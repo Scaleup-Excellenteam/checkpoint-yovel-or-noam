@@ -1,31 +1,20 @@
 import asyncio
 import websockets
 
-clients = set()
 
+async def hello(websocket):
+    name = await websocket.recv()
+    print(f"Server Received: {name}")
 
-async def handle(ws):
-    clients.add(ws)
+    greeting = f"Hello {name}!"
 
-    try:
-        async for msg in ws:
-            await asyncio.gather(*[
-                client.send(msg)
-                for client in clients
-                if client != ws
-            ])
-
-    except websockets.exceptions.ConnectionClosed:
-        pass
-
-    finally:
-        clients.remove(ws)
+    await websocket.send(greeting)
+    print(f"Server Sent: {greeting}")
 
 
 async def main():
-    async with websockets.serve(handle, "localhost", 6789):
-        print("Server running at ws://localhost:6789")
-        await asyncio.Future()  # Run forever
+    async with websockets.serve(hello, "localhost", 8765):
+        await asyncio.Future()  # run forever
 
 
 if __name__ == "__main__":
