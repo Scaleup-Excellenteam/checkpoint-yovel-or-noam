@@ -3,18 +3,38 @@ import os
 import websockets
 
 
-async def hello():
-    uri = os.getenv("CHAT_SERVER_URI", "ws://localhost:8765")
+async def send_messages(websocket, name: str) -> None:
+    """Read keyboard messages and send them to the server."""
+    while True:
+        # Keep receiving messages while waiting for keyboard input.
+        message = await asyncio.to_thread(input, "")
 
-    async with websockets.connect(uri) as websocket:
-        name = input("What's your name? ")
+        if message.lower() == "exit":
+            await websocket.close()
+            return
 
-        await websocket.send(name)
-        print(f"Client sent: {name}")
+        await websocket.send(f"{name}: {message}")
 
-        greeting = await websocket.recv()
-        print(f"Client received: {greeting}")
+
+async def receive_messages(websocket) -> None:
+    """Receive server messages and print them."""
+    async for message in websocket:
+        print(f"\n{message}")
+
+
+async def chat() -> None:
+    """Connect to the server and send and receive messages together."""
+    server_uri = os.getenv("CHAT_SERVER_URI", "ws://localhost:8765")
+
+    async with websockets.connect(server_uri) as websocket:
+        name = input("Your name: ")
+        print("Write a message. Type 'exit' to leave.")
+
+        await asyncio.gather(
+            send_messages(websocket, name),
+            receive_messages(websocket),
+        )
 
 
 if __name__ == "__main__":
-    asyncio.run(hello())
+    asyncio.run(chat())
