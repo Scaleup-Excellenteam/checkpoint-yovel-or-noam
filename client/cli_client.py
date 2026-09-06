@@ -1,9 +1,10 @@
 import asyncio
+import os
 import websockets
 
 
 async def hello():
-    uri = "ws://localhost:8765"
+    uri = os.getenv("CHAT_SERVER_URI", "ws://localhost:8765")
 
     async with websockets.connect(uri) as websocket:
         name = input("What's your name? ")
