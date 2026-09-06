@@ -1,9 +1,14 @@
 import asyncio
 import os
+from typing import TYPE_CHECKING
+
 import websockets
 
+if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
 
-async def send_messages(websocket, name: str) -> None:
+
+async def send_messages(websocket: "ClientConnection", name: str) -> None:
     """Read keyboard messages and send them to the server."""
     while True:
         # Keep receiving messages while waiting for keyboard input.
@@ -16,7 +21,7 @@ async def send_messages(websocket, name: str) -> None:
         await websocket.send(f"{name}: {message}")
 
 
-async def receive_messages(websocket) -> None:
+async def receive_messages(websocket: "ClientConnection") -> None:
     """Receive server messages and print them."""
     async for message in websocket:
         print(f"\n{message}")

@@ -1,8 +1,13 @@
 import asyncio
+from typing import TYPE_CHECKING
+
 import websockets
 
+if TYPE_CHECKING:
+    from websockets.asyncio.server import ServerConnection
+
 # All clients currently connected to the chat.
-clients = set()
+clients: set["ServerConnection"] = set()
 
 
 async def broadcast(message: str) -> None:
@@ -11,7 +16,7 @@ async def broadcast(message: str) -> None:
         await client.send(message)
 
 
-async def chat(websocket) -> None:
+async def chat(websocket: "ServerConnection") -> None:
     """Receive messages from one client and share them with everyone."""
     clients.add(websocket)
     print("Client connected")
