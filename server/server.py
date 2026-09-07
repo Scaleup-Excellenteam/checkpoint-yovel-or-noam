@@ -50,22 +50,80 @@ connection_ips: dict["ServerConnection", str] = {}
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data" / "chat.db"
 LOG_PATH = BASE_DIR / "logs" / "app.log"
+# Problems found while reading settings. main() logs them once logging is set up.
+config_warnings: list[str] = []
+
+
+def load_env_file() -> None:
+    """Read .env into the environment without replacing settings already set.
+
+    A value exported in PowerShell, bash, or a systemd unit always wins, so the
+    file is a default rather than an override.
+    """
+    env_path = BASE_DIR / ".env"
+    if not env_path.is_file():
+        return
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, separator, value = stripped.partition("=")
+        name = key.strip()
+        if not separator or not name or name in os.environ:
+            continue
+        os.environ[name] = value.strip().strip('"').strip("'")
+
+
+load_env_file()
+
+
+def env_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read a whole-number setting, keeping the default when it is unusable."""
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        config_warnings.append(f"{name}={raw_value!r} is not a whole number; using {default}")
+        return default
+
+    if value < minimum:
+        config_warnings.append(f"{name}={value} is below the minimum {minimum}; using {default}")
+        return default
+    return value
+
+
+# These describe how much traffic the server accepts and can be tuned in .env.
+MAX_CONNECTIONS = env_int("CHAT_MAX_CONNECTIONS", 100)
+MAX_CONNECTIONS_PER_IP = env_int("CHAT_MAX_CONNECTIONS_PER_IP", 5)
+MAX_MESSAGES_PER_WINDOW = env_int("CHAT_MAX_MESSAGES_PER_WINDOW", 20)
+MESSAGE_WINDOW_SECONDS = env_int("CHAT_MESSAGE_WINDOW_SECONDS", 10)
+MAX_LOGIN_ATTEMPTS_PER_WINDOW = env_int("CHAT_MAX_LOGIN_ATTEMPTS_PER_WINDOW", 5)
+LOGIN_WINDOW_SECONDS = env_int("CHAT_LOGIN_WINDOW_SECONDS", 60)
+MAX_SIGNUPS_PER_WINDOW = env_int("CHAT_MAX_SIGNUPS_PER_WINDOW", 3)
+SIGNUP_WINDOW_SECONDS = env_int("CHAT_SIGNUP_WINDOW_SECONDS", 60 * 60)
+MAX_DLP_VIOLATIONS = env_int("CHAT_MAX_DLP_VIOLATIONS", 3)
+MAX_MESSAGE_LENGTH = env_int("CHAT_MAX_MESSAGE_LENGTH", 500)
+TOKEN_TTL_SECONDS = env_int("CHAT_TOKEN_TTL_SECONDS", 60 * 60)
+
+# These are not read from .env. Lowering them would weaken how accounts are
+# protected, and that should be a reviewed code change rather than a setting.
 MAX_USERNAME_LENGTH = 16
-MAX_MESSAGE_LENGTH = 500
 MAX_JSON_BODY_BYTES = 4_096
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
 PASSWORD_ITERATIONS = 600_000
-TOKEN_TTL_SECONDS = 60 * 60
-MAX_CONNECTIONS = 100
-MAX_CONNECTIONS_PER_IP = 5
-MAX_MESSAGES_PER_WINDOW = 20
-MESSAGE_WINDOW_SECONDS = 10
-MAX_LOGIN_ATTEMPTS_PER_WINDOW = 5
-LOGIN_WINDOW_SECONDS = 60
-MAX_SIGNUPS_PER_WINDOW = 3
-SIGNUP_WINDOW_SECONDS = 60 * 60
-MAX_DLP_VIOLATIONS = 3
+
+if MAX_MESSAGE_LENGTH >= MAX_JSON_BODY_BYTES:
+    # A longer message would be dropped as an oversized frame before any of the
+    # chat rules could report a clear reason for it.
+    config_warnings.append(
+        f"CHAT_MAX_MESSAGE_LENGTH={MAX_MESSAGE_LENGTH} is not below the "
+        f"{MAX_JSON_BODY_BYTES} byte frame limit; long messages will be dropped"
+    )
 # Accept only this computer by default. The server operator must explicitly
 # enable a LAN binding for the two-computer demo.
 CHAT_BIND_HOST = os.getenv("CHAT_BIND_HOST", "127.0.0.1")
@@ -110,22 +168,6 @@ rate_limit_lock = Lock()
 dlp_scanner = DLPScanner()
 
 
-def load_virustotal_api_key() -> None:
-    """Load only the local VirusTotal key from .env without overriding PowerShell."""
-    env_path = BASE_DIR / ".env"
-    if not env_path.is_file() or os.getenv("VIRUSTOTAL_API_KEY"):
-        return
-
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key.strip() == "VIRUSTOTAL_API_KEY":
-            api_key = value.strip().strip('"').strip("'")
-            if api_key:
-                os.environ["VIRUSTOTAL_API_KEY"] = api_key
-            return
-
-
-load_virustotal_api_key()
 reputation_checker = IPReputationChecker()
 
 
@@ -403,6 +445,7 @@ class RestRequestHandler(BaseHTTPRequestHandler):
                     "websocket_port": CHAT_PORT,
                     # Behind the proxy the browser uses wss://host/ws on port 443.
                     "websocket_path": WEBSOCKET_PROXY_PATH if CHAT_PUBLIC_ORIGIN else None,
+                    "max_message_length": MAX_MESSAGE_LENGTH,
                 }
             )
             return
@@ -778,6 +821,8 @@ async def chat(websocket: "ServerConnection") -> None:
 async def main() -> None:
     """Start the chat server."""
     setup_logging()
+    for warning in config_warnings:
+        logging.warning("Setting ignored: %s", warning)
     init_database()
 
     rest_thread = Thread(target=start_rest_server, daemon=True)

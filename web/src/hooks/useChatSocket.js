@@ -21,6 +21,7 @@ export function useChatSocket({
   room,
   websocketPort,
   websocketPath,
+  maxMessageLength = MAX_MESSAGE_LENGTH,
   onSessionExpired,
 }) {
   const [messages, setMessages] = useState([]);
@@ -167,11 +168,11 @@ export function useChatSocket({
       if (!socket || stageRef.current !== "chatting") {
         return false;
       }
-      if (text.length > MAX_MESSAGE_LENGTH) {
+      if (text.length > maxMessageLength) {
         push({
           kind: "system",
           tone: "error",
-          text: `Message rejected: message cannot be longer than ${MAX_MESSAGE_LENGTH} characters`,
+          text: `Message rejected: message cannot be longer than ${maxMessageLength} characters`,
         });
         return false;
       }
@@ -191,7 +192,7 @@ export function useChatSocket({
       socket.send(text);
       return true;
     },
-    [push],
+    [push, maxMessageLength],
   );
 
   const reconnect = useCallback(() => setAttempt((value) => value + 1), []);

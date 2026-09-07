@@ -4,7 +4,11 @@ import { AuthCard } from "./components/AuthCard.jsx";
 import { ChatRoom } from "./components/ChatRoom.jsx";
 import { useChatSocket } from "./hooks/useChatSocket.js";
 import { useHealth } from "./hooks/useHealth.js";
-import { DEFAULT_ROOMS, DEFAULT_WEBSOCKET_PORT } from "./lib/protocol.js";
+import {
+  DEFAULT_ROOMS,
+  DEFAULT_WEBSOCKET_PORT,
+  MAX_MESSAGE_LENGTH,
+} from "./lib/protocol.js";
 
 export default function App() {
   // The token lives in memory only, so closing the tab ends the session and no
@@ -24,6 +28,10 @@ export default function App() {
     : DEFAULT_WEBSOCKET_PORT;
   // Set only when the server runs behind a TLS proxy that forwards this path.
   const websocketPath = health?.websocket_path ?? null;
+  // The server owns this limit, so follow whatever it reports.
+  const maxMessageLength = Number.isInteger(health?.max_message_length)
+    ? health.max_message_length
+    : MAX_MESSAGE_LENGTH;
 
   const handleSessionExpired = useCallback((message) => {
     window.setTimeout(() => {
@@ -38,6 +46,7 @@ export default function App() {
     room,
     websocketPort,
     websocketPath,
+    maxMessageLength,
     onSessionExpired: handleSessionExpired,
   });
 
@@ -84,6 +93,7 @@ export default function App() {
       status={status}
       statusText={statusText}
       messages={messages}
+      maxMessageLength={maxMessageLength}
       onSelectRoom={handleSelectRoom}
       onSend={sendMessage}
       onReconnect={reconnect}

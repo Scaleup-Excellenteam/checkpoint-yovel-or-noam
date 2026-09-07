@@ -19,7 +19,72 @@ Simple Python WebSocket chat project for the Tel-Hai Bootcamp checkpoint.
 - Important events are written to the terminal and to `logs/app.log`.
 - Messages are saved in SQLite with username, room, content, and time.
 
+## Quick Start (Linux and macOS)
+
+One script prepares everything and starts the server:
+
+```bash
+./scripts/start.sh
+```
+
+It creates the Python virtual environment, installs the packages, copies
+`.env.example` to `.env` if there is no `.env` yet, builds the browser UI, and
+runs the server. Running it again skips whatever is already up to date.
+
+```bash
+./scripts/start.sh --dev          # also run the Vite dev server for UI work
+./scripts/start.sh --skip-build   # use the existing web/dist
+./scripts/start.sh --help
+```
+
+Then open http://localhost:8000.
+
+On Windows, follow the manual steps below, or run the script from Git Bash.
+
+## Settings
+
+Limits live in `.env`, not in the code. Start from the template:
+
+```powershell
+copy .env.example .env
+```
+
+`.env` is ignored by Git, so a key or a local change never reaches GitHub. A
+value exported in PowerShell, bash, or a systemd unit beats the file, so the
+file holds defaults. Restart the server after editing.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `CHAT_MAX_CONNECTIONS` | 100 | Chat connections at the same time |
+| `CHAT_MAX_CONNECTIONS_PER_IP` | 5 | Connections from one address; two tabs count as two |
+| `CHAT_MAX_MESSAGES_PER_WINDOW` | 20 | Messages one client may send per window |
+| `CHAT_MESSAGE_WINDOW_SECONDS` | 10 | Length of that window |
+| `CHAT_MAX_LOGIN_ATTEMPTS_PER_WINDOW` | 5 | Login attempts from one address |
+| `CHAT_LOGIN_WINDOW_SECONDS` | 60 | Length of the login window |
+| `CHAT_MAX_SIGNUPS_PER_WINDOW` | 3 | New accounts from one address |
+| `CHAT_SIGNUP_WINDOW_SECONDS` | 3600 | Length of the signup window |
+| `CHAT_MAX_MESSAGE_LENGTH` | 500 | Longest chat message; must stay below 4096 |
+| `CHAT_MAX_DLP_VIOLATIONS` | 3 | Blocked messages before the connection closes |
+| `CHAT_TOKEN_TTL_SECONDS` | 3600 | How long a login stays valid |
+| `CHAT_BIND_HOST` | 127.0.0.1 | Which addresses the server accepts |
+| `CHAT_WEB_HOSTS` | empty | Extra addresses the UI may be opened from |
+| `CHAT_PUBLIC_ORIGIN` | empty | Public address when behind a TLS proxy |
+| `CHAT_TRUST_PROXY` | 0 | Read the caller address from the proxy |
+| `VIRUSTOTAL_API_KEY` | empty | Enables the Anti-Bot reputation check |
+
+A value that is not a whole number, or is below the smallest sensible number, is
+ignored: the default is used and the reason is written to the log at startup.
+
+The browser UI reads `CHAT_MAX_MESSAGE_LENGTH` from `/health`, so the counter
+under the message box always matches the server.
+
+Password rules, the username rules, and the password hashing cost are
+deliberately not settings. Lowering them would weaken how accounts are
+protected, so they stay in `server/server.py`.
+
 ## Install
+
+These are the manual steps the Quick Start script performs for you.
 
 Run this once:
 
@@ -329,6 +394,8 @@ web/src/components/   Login card, chat room, message list, composer
 web/dist/             Compiled page created by `npm run build`, not in Git
 deploy/Caddyfile      TLS reverse proxy config for publishing on the internet
 deploy/tspo-chat.service  systemd unit that keeps the server running
+scripts/start.sh      Prepares everything and starts the server
+.env.example          Template for .env, where the limits are set
 data/chat.db          Local SQLite database, created automatically
 logs/app.log          Log file, created automatically
 ```

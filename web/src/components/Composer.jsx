@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 
 import { cx } from "../lib/cx.js";
-import { CONTROL_CHARACTERS, MAX_MESSAGE_LENGTH } from "../lib/protocol.js";
+import { CONTROL_CHARACTERS } from "../lib/protocol.js";
 
-export function Composer({ disabled, onSend }) {
+export function Composer({ disabled, maxLength, onSend }) {
   const [draft, setDraft] = useState("");
   const textareaRef = useRef(null);
 
@@ -22,7 +22,7 @@ export function Composer({ disabled, onSend }) {
   }, [disabled]);
 
   const trimmed = draft.trim();
-  const canSend = !disabled && trimmed.length > 0 && draft.length <= MAX_MESSAGE_LENGTH;
+  const canSend = !disabled && trimmed.length > 0 && draft.length <= maxLength;
 
   function handleSubmit(event) {
     event.preventDefault();
@@ -53,7 +53,7 @@ export function Composer({ disabled, onSend }) {
         rows={1}
         value={draft}
         disabled={disabled}
-        maxLength={MAX_MESSAGE_LENGTH}
+        maxLength={maxLength}
         autoComplete="off"
         placeholder={disabled ? "Not connected" : "Write a message and press Enter..."}
         onKeyDown={handleKeyDown}
@@ -65,10 +65,10 @@ export function Composer({ disabled, onSend }) {
         <span
           className={cx(
             "text-xs tabular-nums",
-            draft.length >= MAX_MESSAGE_LENGTH ? "font-semibold text-rose-600" : "text-plum-400",
+            draft.length >= maxLength ? "font-semibold text-rose-600" : "text-plum-400",
           )}
         >
-          {draft.length}/{MAX_MESSAGE_LENGTH}
+          {draft.length}/{maxLength}
         </span>
         <button
           type="submit"

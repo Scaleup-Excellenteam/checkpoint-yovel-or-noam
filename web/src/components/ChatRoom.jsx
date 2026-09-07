@@ -15,6 +15,7 @@ export function ChatRoom({
   status,
   statusText,
   messages,
+  maxMessageLength,
   onSelectRoom,
   onSend,
   onReconnect,
@@ -56,7 +57,7 @@ export function ChatRoom({
       </header>
 
       <MessageList messages={messages} username={username} />
-      <Composer disabled={!online} onSend={onSend} />
+      <Composer disabled={!online} maxLength={maxMessageLength} onSend={onSend} />
     </div>
   );
 }
