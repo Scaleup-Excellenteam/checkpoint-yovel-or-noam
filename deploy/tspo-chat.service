@@ -1,0 +1,28 @@
+# Keep the chat server running and restart it after a reboot.
+#
+#   sudo cp deploy/tspo-chat.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tspo-chat
+#
+# Edit WorkingDirectory, ExecStart and CHAT_PUBLIC_ORIGIN for this machine.
+
+[Unit]
+Description=TSPO Chat server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/checkpoint-yovel-or-noam
+ExecStart=/root/checkpoint-yovel-or-noam/.venv/bin/python server/server.py
+Restart=on-failure
+RestartSec=3
+
+# Stay on the loopback address. Caddy is the only thing that may reach it.
+Environment=CHAT_BIND_HOST=127.0.0.1
+# The public address, used for the allowed origin list and the page policy.
+Environment=CHAT_PUBLIC_ORIGIN=https://chat.example.com
+# Read the caller address from the proxy instead of seeing 127.0.0.1 every time.
+Environment=CHAT_TRUST_PROXY=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+# TLS reverse proxy for TSPO Chat.
+#
+# Caddy terminates HTTPS on port 443 and forwards to the Python server, which
+# stays bound to 127.0.0.1 and is never reachable from the internet directly.
+# Caddy requests and renews the certificate by itself.
+#
+# Run it with the domain that points at this machine:
+#
+#   CHAT_DOMAIN=chat.example.com caddy run --config deploy/Caddyfile
+#
+# Ports 80 and 443 must be open. Port 80 is only used for the certificate
+# challenge and for redirecting visitors to https://.
+
+{$CHAT_DOMAIN} {
+	encode zstd gzip
+
+	# Tell browsers to keep using HTTPS for this site.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	# The chat WebSocket. The browser reaches it over 443 as wss://host/ws, so
+	# port 8765 never has to be opened.
+	handle /ws {
+		reverse_proxy 127.0.0.1:8765
+	}
+
+	# The React UI plus /health, /signup and /login.
+	handle {
+		reverse_proxy 127.0.0.1:8000
+	}
+}
