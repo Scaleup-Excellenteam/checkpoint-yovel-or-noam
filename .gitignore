@@ -1,6 +1,9 @@
 __pycache__/
 *.py[cod]
 data/*.db
+# WAL leaves these beside the database and they hold recent messages.
+data/*.db-wal
+data/*.db-shm
 logs/*.log
 .env
 
