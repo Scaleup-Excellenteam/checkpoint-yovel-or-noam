@@ -98,6 +98,12 @@ async def chat() -> None:
     token = login_or_signup(rest_uri)
 
     async with websockets.connect(server_uri) as websocket:
+        anti_bot_message = await websocket.recv()
+        if not isinstance(anti_bot_message, str) or not anti_bot_message.startswith("Anti-Bot passed: "):
+            print(anti_bot_message)
+            return
+        print(anti_bot_message)
+
         await websocket.send(json.dumps({"token": token}))
         room_name = input("Room (general/secret-pizza): ").strip()
         if not room_name:

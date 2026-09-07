@@ -119,6 +119,7 @@ The server also enforces these protections:
 - Tokens expire after one hour; HTTP request bodies and WebSocket messages have size limits.
 - Raw chat text is not written to the log, and control characters in messages are rejected.
 - DLP blocks pineapple, TSPO secret markers, recipe declarations, and recipe-like messages before they are saved or sent. Three DLP violations close the connection. See [the full DLP policy](docs/dlp-policy.md).
+- Anti-Bot checks every public client IP against VirusTotal before authentication. Malicious or suspicious IPs are blocked; private lab-network IPs are allowed. Results are cached for 10 minutes.
 
 ### Network encryption
 
@@ -127,7 +128,7 @@ Do not expose it to the internet. A real deployment must place the app behind a
 TLS-enabled reverse proxy and use `https://` and `wss://` URLs, otherwise a
 person on the network could read passwords, tokens, and messages.
 
-### VirusTotal (optional)
+### VirusTotal (optional, required for public-IP Anti-Bot checks)
 
 VirusTotal is for checking a suspicious downloaded file, not for uploading this
 project's source code, `data/chat.db`, `.env`, or logs. Public VirusTotal file
@@ -139,6 +140,11 @@ uploads can be shared with security partners.
 ```powershell
 $env:VIRUSTOTAL_API_KEY="paste-your-key-here"
 ```
+
+Start the server from that same PowerShell window. Without an API key, the
+server allows public IPs and records `REPUTATION_UNAVAILABLE`; it never places
+the key in the repository. Private IPs in a classroom or home network are
+allowed with `IP_PRIVATE_NETWORK`.
 
 3. First check whether a file's SHA-256 is already known. This does **not**
 upload the file:

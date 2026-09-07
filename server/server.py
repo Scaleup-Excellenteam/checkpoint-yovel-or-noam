@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import websockets
 from dlp import DLPScanner
+from reputation import IPReputationChecker
 
 if TYPE_CHECKING:
     from websockets.asyncio.server import ServerConnection
@@ -64,6 +65,7 @@ message_history: dict["ServerConnection", deque[float]] = defaultdict(deque)
 dlp_violations: dict["ServerConnection", int] = defaultdict(int)
 rate_limit_lock = Lock()
 dlp_scanner = DLPScanner()
+reputation_checker = IPReputationChecker()
 
 
 def setup_logging() -> None:
@@ -457,6 +459,24 @@ async def chat(websocket: "ServerConnection") -> None:
     username: str | None = None
     room_name: str | None = None
     try:
+        reputation_decision = await asyncio.to_thread(reputation_checker.check_ip, client_ip)
+        if not reputation_decision.allowed:
+            logging.warning(
+                "Anti-bot blocked: ip=%s reason=%s",
+                client_ip,
+                reputation_decision.reason_code,
+            )
+            await websocket.send(f"Connection blocked: {reputation_decision.reason_code}")
+            await websocket.close(1008, "Anti-Bot reputation block")
+            return
+
+        logging.info(
+            "Anti-bot allowed: ip=%s reason=%s",
+            client_ip,
+            reputation_decision.reason_code,
+        )
+        await websocket.send(f"Anti-Bot passed: {reputation_decision.reason_code}")
+
         username = await asyncio.wait_for(authenticate_websocket(websocket), timeout=10)
         if username is None:
             await websocket.close()
