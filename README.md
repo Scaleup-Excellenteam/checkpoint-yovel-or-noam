@@ -395,6 +395,23 @@ python scripts\virustotal_check.py "C:\path\to\suspicious-file.exe"
 python scripts\virustotal_check.py "C:\path\to\suspicious-file.exe" --upload
 ```
 
+## Load Testing
+
+`scripts/loadtest.py` drives simulated people through the real protocol - signup,
+login, joining rooms, chatting, leaving, reconnecting and misbehaving - and
+reports what the server did while it was busy. It starts its own server on unused
+ports by default, so a run never touches real data.
+
+```bash
+python scripts/loadtest.py --scenario all
+python scripts/loadtest.py --scenario chat --users 40 --messages 10
+python scripts/loadtest.py --scenario login --users 25 --production-limits
+python scripts/loadtest.py --scenario chat --target http://localhost:8000
+```
+
+The workload of each scenario, the measured results and what they showed about
+the server are written up in [the load-testing notes](docs/load-testing.md).
+
 ## Final Demo Checklist (Day 3)
 
 Use [the complete final-demo guide](docs/final-demo.md) for commands, expected
@@ -422,6 +439,7 @@ web/dist/             Compiled page created by `npm run build`, not in Git
 deploy/Caddyfile      TLS reverse proxy config for publishing on the internet
 deploy/tspo-chat.service  systemd unit that keeps the server running
 scripts/start.sh      Prepares everything and starts the server
+scripts/loadtest.py   Simulated users for load and edge-case testing
 .env.example          Template for .env, where the limits are set
 data/chat.db          Local SQLite database, created automatically
 logs/app.log          Log file, created automatically
