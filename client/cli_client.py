@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import json
 import os
 from getpass import getpass
@@ -11,6 +12,26 @@ import websockets
 
 if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
+
+MAX_USERNAME_LENGTH = 16
+VALID_ACTIONS = ("signup", "login")
+VALID_ROOMS = ("general", "secret-pizza")
+
+
+def normalize_choice(value: str, valid_choices: tuple[str, ...], label: str) -> str:
+    """Accept exact input or a close typo for a known option."""
+    clean_value = value.strip().lower()
+    if clean_value in valid_choices:
+        return clean_value
+
+    close_matches = difflib.get_close_matches(clean_value, valid_choices, n=1, cutoff=0.7)
+    if close_matches:
+        fixed_value = close_matches[0]
+        print(f"{label} typo detected. Using '{fixed_value}' instead of '{value}'.")
+        return fixed_value
+
+    options = ", ".join(valid_choices)
+    raise ValueError(f"{label} must be one of: {options}")
 
 
 def post_json(rest_uri: str, path: str, payload: dict[str, str]) -> dict[str, str]:
@@ -35,11 +56,16 @@ def post_json(rest_uri: str, path: str, payload: dict[str, str]) -> dict[str, st
 
 def login_or_signup(rest_uri: str) -> str:
     """Ask the user to sign up or log in and return an auth token."""
-    action = input("Choose action: signup/login: ").strip().lower()
-    if action not in {"signup", "login"}:
-        raise ValueError("Action must be signup or login")
+    action = normalize_choice(
+        input("Choose action: signup/login: "),
+        VALID_ACTIONS,
+        "Action",
+    )
 
     username = input("Username: ").strip()
+    if len(username) > MAX_USERNAME_LENGTH:
+        raise ValueError(f"Username cannot be longer than {MAX_USERNAME_LENGTH} characters")
+
     password = getpass("Password: ")
 
     if action == "signup":
@@ -105,7 +131,11 @@ async def chat() -> None:
         print(anti_bot_message)
 
         await websocket.send(json.dumps({"token": token}))
-        room_name = input("Room (general/secret-pizza): ").strip()
+        room_name = normalize_choice(
+            input("Room (general/secret-pizza): "),
+            VALID_ROOMS,
+            "Room",
+        )
         if not room_name:
             raise ValueError("Room cannot be empty")
 

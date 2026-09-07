@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import hashlib
 import hmac
 import json
@@ -44,9 +45,9 @@ client_rooms: dict["ServerConnection", str] = {}
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data" / "chat.db"
 LOG_PATH = BASE_DIR / "logs" / "app.log"
+MAX_USERNAME_LENGTH = 16
 MAX_MESSAGE_LENGTH = 500
 MAX_JSON_BODY_BYTES = 4_096
-MAX_USERNAME_LENGTH = 32
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 128
 PASSWORD_ITERATIONS = 600_000
@@ -60,7 +61,8 @@ LOGIN_WINDOW_SECONDS = 60
 MAX_SIGNUPS_PER_WINDOW = 3
 SIGNUP_WINDOW_SECONDS = 60 * 60
 MAX_DLP_VIOLATIONS = 3
-USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
+VALID_ROOMS = tuple(rooms.keys())
 request_history: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 message_history: dict["ServerConnection", deque[float]] = defaultdict(deque)
 dlp_violations: dict["ServerConnection", int] = defaultdict(int)
@@ -164,6 +166,17 @@ def create_user(username: str, password: str) -> bool:
     return True
 
 
+def validate_username(username: str) -> str | None:
+    """Return an error message when the username is invalid."""
+    if not username:
+        return "username is required"
+
+    if len(username) > MAX_USERNAME_LENGTH:
+        return f"username cannot be longer than {MAX_USERNAME_LENGTH} characters"
+
+    return None
+
+
 def check_login(username: str, password: str) -> bool:
     """Return True only when the username exists and the password matches."""
     with sqlite3.connect(DB_PATH) as connection:
@@ -187,7 +200,7 @@ def check_login(username: str, password: str) -> bool:
 def validate_signup(username: str, password: str) -> str | None:
     """Return a public error string when signup credentials are unsafe."""
     if not USERNAME_PATTERN.fullmatch(username):
-        return "username must be 3-32 characters: letters, numbers, _ or -"
+        return "username must be 3-16 characters: letters, numbers, _ or -"
     if not MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH:
         return f"password must be {MIN_PASSWORD_LENGTH}-{MAX_PASSWORD_LENGTH} characters"
     return None
@@ -318,8 +331,14 @@ class RestRequestHandler(BaseHTTPRequestHandler):
             return
         username = username_value.strip()
         password = password_value
-        if not username or not password:
-            self.send_json({"error": "username and password are required"}, 400)
+
+        username_error = validate_username(username)
+        if username_error is not None:
+            self.send_json({"error": username_error}, 400)
+            return
+
+        if not password:
+            self.send_json({"error": "password is required"}, 400)
             return
 
         if not check_login(username, password):
@@ -399,6 +418,19 @@ def validate_chat_message(message: str) -> str | None:
     return None
 
 
+def normalize_room_name(room_name: str) -> str | None:
+    """Return an existing room name, allowing small typing mistakes."""
+    clean_room_name = room_name.strip().lower()
+    if clean_room_name in rooms:
+        return clean_room_name
+
+    close_matches = difflib.get_close_matches(clean_room_name, VALID_ROOMS, n=1, cutoff=0.7)
+    if close_matches:
+        return close_matches[0]
+
+    return None
+
+
 async def authenticate_websocket(websocket: "ServerConnection") -> str | None:
     """Read the first client message and return the logged-in username."""
     try:
@@ -448,8 +480,8 @@ async def join_room(websocket: "ServerConnection") -> str | None:
     if not isinstance(room_value, str):
         await websocket.send("Join room failed: invalid room")
         return None
-    room_name = room_value.strip()
-    if room_name not in rooms:
+    room_name = normalize_room_name(room_value)
+    if room_name is None:
         available_rooms = ", ".join(rooms)
         await websocket.send(f"Join room failed: choose one of {available_rooms}")
         return None
