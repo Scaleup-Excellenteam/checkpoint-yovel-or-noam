@@ -1,0 +1,142 @@
+name: CI
+
+# Runs on every push to main and on every pull request aimed at main, so a
+# change is checked before it is merged and again once it lands.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only. The workflow never needs a secret: it does not publish an image,
+# deploy anything, or talk to the running server, so nothing is passed to it
+# and nothing can be printed by it.
+permissions:
+  contents: read
+
+# A newer push to the same branch makes an in-flight run pointless, so cancel it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Tests, security and UI build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      # Password hashing is deliberately slow, and a few tests sign in dozens of
+      # accounts at once, so this step gets a generous allowance of its own.
+      - name: Run the test suite
+        run: python -m pytest -q
+        timeout-minutes: 15
+
+      - name: Static security scan
+        run: python -m bandit -q -r server client scripts
+
+      # Audits what actually ships, so an unrelated development tool picking up
+      # an advisory cannot fail the build.
+      - name: Dependency vulnerability audit
+        run: python -m pip_audit -r requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the browser UI
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Confirm the UI actually produced a page
+        run: test -f web/dist/index.html
+
+      # Starts its own server on unused ports, so this is isolated from
+      # everything else in the job.
+      - name: Load-test smoke scenario
+        run: python scripts/loadtest.py --scenario abuse --prefix ci
+        timeout-minutes: 8
+
+  container:
+    name: Container build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python for the client used against the container
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install the client dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Build the image
+        run: docker build -t tspo-chat:ci .
+
+      - name: Start the container
+        run: |
+          docker run -d --name tspo-chat-ci \
+            -p 8000:8000 -p 8765:8765 \
+            -e CHAT_BIND_HOST=0.0.0.0 \
+            tspo-chat:ci
+
+      - name: Wait for the container to report healthy
+        run: |
+          for attempt in $(seq 1 60); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' tspo-chat-ci)
+            echo "attempt ${attempt}: ${status}"
+            if [ "${status}" = "healthy" ]; then exit 0; fi
+            if [ "${status}" = "unhealthy" ]; then break; fi
+            sleep 2
+          done
+          echo "the container never became healthy"
+          docker logs tspo-chat-ci
+          exit 1
+
+      - name: Check the packaged endpoints
+        run: |
+          curl --fail --silent --show-error --max-time 15 http://localhost:8000/health
+          echo
+          curl --fail --silent --show-error --max-time 15 http://localhost:8000/ | grep -q 'id="root"'
+          echo "the browser UI is served by the image"
+
+      # Proves a real client can reach the packaged application over the real
+      # protocol, not just that the port answers.
+      - name: Drive the packaged application with a real client
+        run: python scripts/loadtest.py --scenario abuse --target http://localhost:8000 --prefix ci
+        timeout-minutes: 8
+
+      - name: Show the container log when something failed
+        if: failure()
+        run: docker logs tspo-chat-ci
+
+      - name: Stop the container
+        if: always()
+        run: docker rm -f tspo-chat-ci
