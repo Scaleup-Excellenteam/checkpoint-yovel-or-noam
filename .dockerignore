@@ -1,0 +1,48 @@
+# Keep secrets, real data and generated files out of the build context.
+# Anything listed here can never end up in an image layer.
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Real data: the database and its WAL sidecars must never be baked in
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node: dependencies are installed inside the build stage, and dist is rebuilt
+web/node_modules/
+web/dist/
+npm-debug.log*
+
+# Version control and CI
+.git/
+.gitignore
+.github/
+
+# Things the running application does not need
+tests/
+docs/
+deploy/
+scripts/virustotal_check.py
+*.pdf
+*.md
+!README.md

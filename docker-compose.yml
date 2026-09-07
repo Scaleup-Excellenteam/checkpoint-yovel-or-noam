@@ -1,0 +1,54 @@
+# Start the whole chat server in one command:
+#
+#   docker compose up --build -d
+#
+# The UI is then at http://localhost:8000 and the chat socket at port 8765.
+
+services:
+  chat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tspo-chat:local
+    container_name: tspo-chat
+    restart: unless-stopped
+
+    # Both ports are mapped one to one on purpose. The allowed WebSocket
+    # origins are built from port 8000, so publishing the UI on a different
+    # host port would make the browser's Origin header fail the check.
+    ports:
+      - "8000:8000"
+      - "8765:8765"
+
+    environment:
+      # Without this the server would listen on the container's loopback only.
+      CHAT_BIND_HOST: "0.0.0.0"
+      CHAT_LOG_LEVEL: "INFO"
+
+    # Optional. Put VIRUSTOTAL_API_KEY and any tuning in .env; it is never
+    # baked into the image and the file does not have to exist.
+    env_file:
+      - path: .env
+        required: false
+
+    # Named volumes rather than bind mounts: SQLite in WAL mode needs working
+    # file locking, and a named volume lives on the Docker filesystem where
+    # that behaves correctly on every host.
+    volumes:
+      - chat-data:/app/data
+      - chat-logs:/app/logs
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  chat-data:
+  chat-logs:

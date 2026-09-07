@@ -395,6 +395,18 @@ python scripts\virustotal_check.py "C:\path\to\suspicious-file.exe"
 python scripts\virustotal_check.py "C:\path\to\suspicious-file.exe" --upload
 ```
 
+## Docker
+
+The whole server, including the compiled browser UI, runs in one container:
+
+```bash
+docker compose up --build -d      # then open http://localhost:8000
+docker compose down               # stop, keeping the database
+```
+
+The build, the port and storage rules and the troubleshooting table are in
+[the Docker notes](docs/docker.md).
+
 ## Load Testing
 
 `scripts/loadtest.py` drives simulated people through the real protocol - signup,
@@ -440,6 +452,8 @@ deploy/Caddyfile      TLS reverse proxy config for publishing on the internet
 deploy/tspo-chat.service  systemd unit that keeps the server running
 scripts/start.sh      Prepares everything and starts the server
 scripts/loadtest.py   Simulated users for load and edge-case testing
+Dockerfile            Two-stage build: Node compiles the UI, Python runs it
+docker-compose.yml    One-command startup with named volumes for data and logs
 .env.example          Template for .env, where the limits are set
 data/chat.db          Local SQLite database, created automatically
 logs/app.log          Log file, created automatically
