@@ -96,6 +96,62 @@ From another laptop:
 Invoke-RestMethod "http://SERVER_IP:8000/health"
 ```
 
+## Security Checks
+
+Run the project's automated tests:
+
+```powershell
+python -m pytest -q
+```
+
+Check installed Python packages for known published vulnerabilities:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pip_audit
+```
+
+The server also enforces these protections:
+
+- New usernames are 3-32 letters, numbers, `_`, or `-`; new passwords are 8-128 characters.
+- Password hashes use PBKDF2-HMAC-SHA256 with 600,000 iterations. Old accounts continue to work with their original hash cost.
+- Login attempts, signups, WebSocket connections, and message speed are rate-limited.
+- Tokens expire after one hour; HTTP request bodies and WebSocket messages have size limits.
+- Raw chat text is not written to the log, and control characters in messages are rejected.
+
+### Network encryption
+
+The default `http://` and `ws://` setup is for a trusted local demo network only.
+Do not expose it to the internet. A real deployment must place the app behind a
+TLS-enabled reverse proxy and use `https://` and `wss://` URLs, otherwise a
+person on the network could read passwords, tokens, and messages.
+
+### VirusTotal (optional)
+
+VirusTotal is for checking a suspicious downloaded file, not for uploading this
+project's source code, `data/chat.db`, `.env`, or logs. Public VirusTotal file
+uploads can be shared with security partners.
+
+1. Create a VirusTotal Community account and copy your API key from its profile.
+2. Set the key only for the current PowerShell window:
+
+```powershell
+$env:VIRUSTOTAL_API_KEY="paste-your-key-here"
+```
+
+3. First check whether a file's SHA-256 is already known. This does **not**
+upload the file:
+
+```powershell
+python scripts\virustotal_check.py "C:\path\to\suspicious-file.exe"
+```
+
+4. Only when the file is safe to share publicly and no report exists, upload it:
+
+```powershell
+python scripts\virustotal_check.py "C:\path\to\suspicious-file.exe" --upload
+```
+
 ## Day 1 Demo Checklist
 
 1. Start the server.

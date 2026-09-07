@@ -1,13 +1,18 @@
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
+import re
 import secrets
 import sqlite3
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import TYPE_CHECKING, Any
 
 import websockets
@@ -17,7 +22,16 @@ if TYPE_CHECKING:
 
 # All clients currently connected to the chat.
 clients: set["ServerConnection"] = set()
-active_tokens: dict[str, str] = {}
+connected_sockets: set["ServerConnection"] = set()
+
+
+@dataclass(frozen=True)
+class TokenSession:
+    username: str
+    expires_at: float
+
+
+active_tokens: dict[str, TokenSession] = {}
 authenticated_clients: dict["ServerConnection", str] = {}
 rooms: dict[str, set["ServerConnection"]] = {
     "general": set(),
@@ -28,6 +42,24 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data" / "chat.db"
 LOG_PATH = BASE_DIR / "logs" / "app.log"
 MAX_MESSAGE_LENGTH = 500
+MAX_JSON_BODY_BYTES = 4_096
+MAX_USERNAME_LENGTH = 32
+MIN_PASSWORD_LENGTH = 8
+MAX_PASSWORD_LENGTH = 128
+PASSWORD_ITERATIONS = 600_000
+TOKEN_TTL_SECONDS = 60 * 60
+MAX_CONNECTIONS = 100
+MAX_CONNECTIONS_PER_IP = 5
+MAX_MESSAGES_PER_WINDOW = 20
+MESSAGE_WINDOW_SECONDS = 10
+MAX_LOGIN_ATTEMPTS_PER_WINDOW = 5
+LOGIN_WINDOW_SECONDS = 60
+MAX_SIGNUPS_PER_WINDOW = 3
+SIGNUP_WINDOW_SECONDS = 60 * 60
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
+request_history: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+message_history: dict["ServerConnection", deque[float]] = defaultdict(deque)
+rate_limit_lock = Lock()
 
 
 def setup_logging() -> None:
@@ -52,10 +84,17 @@ def init_database() -> None:
             CREATE TABLE IF NOT EXISTS users (
                 username TEXT PRIMARY KEY,
                 password_salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL
+                password_hash TEXT NOT NULL,
+                password_iterations INTEGER NOT NULL
             )
             """
         )
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
+        if "password_iterations" not in columns:
+            # Keep existing accounts working while new accounts use the stronger cost.
+            connection.execute(
+                "ALTER TABLE users ADD COLUMN password_iterations INTEGER NOT NULL DEFAULT 100000"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -69,13 +108,13 @@ def init_database() -> None:
         )
 
 
-def hash_password(password: str, salt: str) -> str:
+def hash_password(password: str, salt: str, iterations: int = PASSWORD_ITERATIONS) -> str:
     """Hash a password with PBKDF2 and return it as hex text."""
     hashed_password = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
         salt.encode("utf-8"),
-        100_000,
+        iterations,
     )
     return hashed_password.hex()
 
@@ -89,10 +128,10 @@ def create_user(username: str, password: str) -> bool:
         with sqlite3.connect(DB_PATH) as connection:
             connection.execute(
                 """
-                INSERT INTO users (username, password_salt, password_hash)
-                VALUES (?, ?, ?)
+                INSERT INTO users (username, password_salt, password_hash, password_iterations)
+                VALUES (?, ?, ?, ?)
                 """,
-                (username, salt, password_hash),
+                (username, salt, password_hash, PASSWORD_ITERATIONS),
             )
     except sqlite3.IntegrityError:
         return False
@@ -105,7 +144,7 @@ def check_login(username: str, password: str) -> bool:
     with sqlite3.connect(DB_PATH) as connection:
         row = connection.execute(
             """
-            SELECT password_salt, password_hash
+            SELECT password_salt, password_hash, password_iterations
             FROM users
             WHERE username = ?
             """,
@@ -115,8 +154,49 @@ def check_login(username: str, password: str) -> bool:
     if row is None:
         return False
 
-    salt, saved_password_hash = row
-    return hash_password(password, salt) == saved_password_hash
+    salt, saved_password_hash, iterations = row
+    supplied_password_hash = hash_password(password, salt, iterations)
+    return hmac.compare_digest(supplied_password_hash, saved_password_hash)
+
+
+def validate_signup(username: str, password: str) -> str | None:
+    """Return a public error string when signup credentials are unsafe."""
+    if not USERNAME_PATTERN.fullmatch(username):
+        return "username must be 3-32 characters: letters, numbers, _ or -"
+    if not MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH:
+        return f"password must be {MIN_PASSWORD_LENGTH}-{MAX_PASSWORD_LENGTH} characters"
+    return None
+
+
+def allow_event(key: object, limit: int, window_seconds: int) -> bool:
+    """Allow a bounded number of events in a sliding time window."""
+    now = time.monotonic()
+    with rate_limit_lock:
+        events = request_history[key] if isinstance(key, tuple) else message_history[key]
+        while events and events[0] <= now - window_seconds:
+            events.popleft()
+        if len(events) >= limit:
+            return False
+        events.append(now)
+    return True
+
+
+def create_token(username: str) -> str:
+    """Create a short-lived bearer token for an authenticated user."""
+    token = secrets.token_urlsafe(32)
+    active_tokens[token] = TokenSession(username, time.monotonic() + TOKEN_TTL_SECONDS)
+    return token
+
+
+def get_token_username(token: str) -> str | None:
+    """Return a username only for a valid, unexpired token."""
+    session = active_tokens.get(token)
+    if session is None:
+        return None
+    if session.expires_at <= time.monotonic():
+        active_tokens.pop(token, None)
+        return None
+    return session.username
 
 
 def save_message(username: str, room_name: str, content: str) -> None:
@@ -167,11 +247,25 @@ class RestRequestHandler(BaseHTTPRequestHandler):
 
     def handle_signup(self) -> None:
         request_data = self.read_json_body()
-        username = str(request_data.get("username", "")).strip()
-        password = str(request_data.get("password", "")).strip()
+        if request_data is None:
+            self.send_json({"error": "request body must be valid JSON and at most 4096 bytes"}, 400)
+            return
+        client_ip = self.client_address[0]
+        if not allow_event(("signup", client_ip), MAX_SIGNUPS_PER_WINDOW, SIGNUP_WINDOW_SECONDS):
+            logging.warning("Signup rate limit exceeded for IP %s", client_ip)
+            self.send_json({"error": "too many signup attempts; try again later"}, 429)
+            return
+        username_value = request_data.get("username")
+        password_value = request_data.get("password")
+        if not isinstance(username_value, str) or not isinstance(password_value, str):
+            self.send_json({"error": "username and password must be text"}, 400)
+            return
+        username = username_value.strip()
+        password = password_value
 
-        if not username or not password:
-            self.send_json({"error": "username and password are required"}, 400)
+        validation_error = validate_signup(username, password)
+        if validation_error is not None:
+            self.send_json({"error": validation_error}, 400)
             return
 
         if not create_user(username, password):
@@ -183,9 +277,22 @@ class RestRequestHandler(BaseHTTPRequestHandler):
 
     def handle_login(self) -> None:
         request_data = self.read_json_body()
-        username = str(request_data.get("username", "")).strip()
-        password = str(request_data.get("password", "")).strip()
+        if request_data is None:
+            self.send_json({"error": "request body must be valid JSON and at most 4096 bytes"}, 400)
+            return
+        client_ip = self.client_address[0]
+        if not allow_event(("login", client_ip), MAX_LOGIN_ATTEMPTS_PER_WINDOW, LOGIN_WINDOW_SECONDS):
+            logging.warning("Login rate limit exceeded for IP %s", client_ip)
+            self.send_json({"error": "too many login attempts; try again later"}, 429)
+            return
 
+        username_value = request_data.get("username")
+        password_value = request_data.get("password")
+        if not isinstance(username_value, str) or not isinstance(password_value, str):
+            self.send_json({"error": "username and password must be text"}, 400)
+            return
+        username = username_value.strip()
+        password = password_value
         if not username or not password:
             self.send_json({"error": "username and password are required"}, 400)
             return
@@ -194,23 +301,27 @@ class RestRequestHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "invalid username or password"}, 401)
             return
 
-        token = secrets.token_urlsafe(32)
-        active_tokens[token] = username
+        token = create_token(username)
 
         logging.info("User logged in: %s", username)
         self.send_json({"status": "ok", "username": username, "token": token})
 
-    def read_json_body(self) -> dict[str, Any]:
-        content_length = int(self.headers.get("Content-Length", 0))
+    def read_json_body(self) -> dict[str, Any] | None:
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return None
+        if content_length < 1 or content_length > MAX_JSON_BODY_BYTES:
+            return None
         body = self.rfile.read(content_length)
 
         try:
             request_data = json.loads(body)
         except json.JSONDecodeError:
-            return {}
+            return None
 
         if not isinstance(request_data, dict):
-            return {}
+            return None
 
         return request_data
 
@@ -219,6 +330,8 @@ class RestRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response_body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(response_body)
 
@@ -255,6 +368,9 @@ def validate_chat_message(message: str) -> str | None:
     if len(message) > MAX_MESSAGE_LENGTH:
         return f"Message rejected: message cannot be longer than {MAX_MESSAGE_LENGTH} characters"
 
+    if any(ord(character) < 32 or ord(character) == 127 for character in message):
+        return "Message rejected: control characters are not allowed"
+
     return None
 
 
@@ -262,6 +378,9 @@ async def authenticate_websocket(websocket: "ServerConnection") -> str | None:
     """Read the first client message and return the logged-in username."""
     try:
         auth_message = await websocket.recv()
+        if not isinstance(auth_message, str):
+            await websocket.send("Authentication failed: binary messages are not allowed")
+            return None
         auth_data = json.loads(auth_message)
     except json.JSONDecodeError:
         await websocket.send("Authentication failed: invalid JSON")
@@ -271,8 +390,11 @@ async def authenticate_websocket(websocket: "ServerConnection") -> str | None:
         await websocket.send("Authentication failed: invalid message")
         return None
 
-    token = str(auth_data.get("token", ""))
-    username = active_tokens.get(token)
+    token = auth_data.get("token")
+    if not isinstance(token, str):
+        await websocket.send("Authentication failed: invalid token")
+        return None
+    username = get_token_username(token)
 
     if username is None:
         await websocket.send("Authentication failed: invalid token")
@@ -285,6 +407,9 @@ async def join_room(websocket: "ServerConnection") -> str | None:
     """Read the selected room from the client and add the client to it."""
     try:
         room_message = await websocket.recv()
+        if not isinstance(room_message, str):
+            await websocket.send("Join room failed: binary messages are not allowed")
+            return None
         room_data = json.loads(room_message)
     except json.JSONDecodeError:
         await websocket.send("Join room failed: invalid JSON")
@@ -294,7 +419,11 @@ async def join_room(websocket: "ServerConnection") -> str | None:
         await websocket.send("Join room failed: invalid message")
         return None
 
-    room_name = str(room_data.get("room", "")).strip()
+    room_value = room_data.get("room")
+    if not isinstance(room_value, str):
+        await websocket.send("Join room failed: invalid room")
+        return None
+    room_name = room_value.strip()
     if room_name not in rooms:
         available_rooms = ", ".join(rooms)
         await websocket.send(f"Join room failed: choose one of {available_rooms}")
@@ -307,40 +436,68 @@ async def join_room(websocket: "ServerConnection") -> str | None:
 
 async def chat(websocket: "ServerConnection") -> None:
     """Receive messages from one client and share them with everyone."""
-    username = await authenticate_websocket(websocket)
-    if username is None:
-        await websocket.close()
+    remote_address = websocket.remote_address
+    client_ip = remote_address[0] if remote_address else "unknown"
+    if len(connected_sockets) >= MAX_CONNECTIONS:
+        await websocket.close(1013, "Server is busy")
+        return
+    if sum(
+        1
+        for socket in connected_sockets
+        if socket.remote_address and socket.remote_address[0] == client_ip
+    ) >= MAX_CONNECTIONS_PER_IP:
+        await websocket.close(1008, "Too many connections from this IP")
         return
 
-    room_name = await join_room(websocket)
-    if room_name is None:
-        await websocket.close()
-        return
-
-    clients.add(websocket)
-    authenticated_clients[websocket] = username
-    logging.info("Client connected: %s joined %s", username, room_name)
-    await websocket.send(f"Welcome {username}! You joined room: {room_name}")
-
+    connected_sockets.add(websocket)
+    username: str | None = None
+    room_name: str | None = None
     try:
+        username = await asyncio.wait_for(authenticate_websocket(websocket), timeout=10)
+        if username is None:
+            await websocket.close()
+            return
+
+        room_name = await asyncio.wait_for(join_room(websocket), timeout=10)
+        if room_name is None:
+            await websocket.close()
+            return
+
+        clients.add(websocket)
+        authenticated_clients[websocket] = username
+        logging.info("Client connected: %s joined %s", username, room_name)
+        await websocket.send(f"Welcome {username}! You joined room: {room_name}")
+
         # Share every message only with clients in the same room.
         async for message in websocket:
+            if not isinstance(message, str):
+                await websocket.send("Message rejected: binary messages are not allowed")
+                continue
+            if not allow_event(websocket, MAX_MESSAGES_PER_WINDOW, MESSAGE_WINDOW_SECONDS):
+                logging.warning("Message rate limit exceeded for user %s", username)
+                await websocket.send("Message rejected: sending messages too quickly")
+                await websocket.close(1008, "Message rate limit exceeded")
+                return
             validation_error = validate_chat_message(message)
             if validation_error is not None:
-                logging.info("%s invalid message: %s", username, validation_error)
+                logging.info("%s sent an invalid message: %s", username, validation_error)
                 await websocket.send(validation_error)
                 continue
 
             save_message(username, room_name, message)
             chat_message = f"[{room_name}] {username}: {message}"
-            logging.info(chat_message)
+            logging.info("Message saved: user=%s room=%s length=%d", username, room_name, len(message))
             await broadcast_to_room(room_name, chat_message)
     finally:
         clients.discard(websocket)
-        rooms[room_name].discard(websocket)
+        connected_sockets.discard(websocket)
+        if room_name is not None:
+            rooms[room_name].discard(websocket)
         client_rooms.pop(websocket, None)
         authenticated_clients.pop(websocket, None)
-        logging.info("Client disconnected: %s left %s", username, room_name)
+        message_history.pop(websocket, None)
+        if username is not None and room_name is not None:
+            logging.info("Client disconnected: %s left %s", username, room_name)
 
 
 async def main() -> None:
@@ -351,7 +508,17 @@ async def main() -> None:
     rest_thread = Thread(target=start_rest_server, daemon=True)
     rest_thread.start()
 
-    async with websockets.serve(chat, "0.0.0.0", 8765):
+    async with websockets.serve(
+        chat,
+        "0.0.0.0",
+        8765,
+        max_size=MAX_JSON_BODY_BYTES,
+        max_queue=16,
+        open_timeout=10,
+        ping_interval=20,
+        ping_timeout=20,
+        origins=[None],
+    ):
         logging.info("Chat server running on port 8765")
         await asyncio.Future()  # run forever
 

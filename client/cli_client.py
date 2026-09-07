@@ -1,7 +1,9 @@
 import asyncio
 import json
 import os
+from getpass import getpass
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -38,7 +40,7 @@ def login_or_signup(rest_uri: str) -> str:
         raise ValueError("Action must be signup or login")
 
     username = input("Username: ").strip()
-    password = input("Password: ").strip()
+    password = getpass("Password: ")
 
     if action == "signup":
         signup_response = post_json(
@@ -72,7 +74,11 @@ async def send_messages(websocket: "ClientConnection") -> None:
             print("Message cannot be empty")
             continue
 
-        await websocket.send(message)
+        try:
+            await websocket.send(message)
+        except websockets.exceptions.ConnectionClosed:
+            print("Connection closed by the server.")
+            return
 
 
 async def receive_messages(websocket: "ClientConnection") -> None:
@@ -85,6 +91,10 @@ async def chat() -> None:
     """Connect to the server and send and receive messages together."""
     server_uri = os.getenv("CHAT_SERVER_URI", "ws://localhost:8765")
     rest_uri = os.getenv("CHAT_REST_URI", "http://localhost:8000")
+    if urlparse(server_uri).scheme not in {"ws", "wss"}:
+        raise ValueError("CHAT_SERVER_URI must start with ws:// or wss://")
+    if urlparse(rest_uri).scheme not in {"http", "https"}:
+        raise ValueError("CHAT_REST_URI must start with http:// or https://")
     token = login_or_signup(rest_uri)
 
     async with websockets.connect(server_uri) as websocket:
@@ -94,6 +104,12 @@ async def chat() -> None:
             raise ValueError("Room cannot be empty")
 
         await websocket.send(json.dumps({"room": room_name}))
+        first_server_message = await websocket.recv()
+        if not isinstance(first_server_message, str) or not first_server_message.startswith("Welcome "):
+            print(first_server_message)
+            return
+
+        print(first_server_message)
         print("Write a message. Type 'exit' to leave.")
 
         await asyncio.gather(
