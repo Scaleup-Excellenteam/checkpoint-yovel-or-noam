@@ -12,12 +12,13 @@ import socket
 import sqlite3
 import time
 from collections import defaultdict, deque
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 from urllib.parse import unquote, urlsplit
 
 import websockets
@@ -39,6 +40,8 @@ class TokenSession:
 
 
 active_tokens: dict[str, TokenSession] = {}
+# active_tokens is read by the chat loop and written by REST threads.
+token_lock = Lock()
 authenticated_clients: dict["ServerConnection", str] = {}
 rooms: dict[str, set["ServerConnection"]] = {
     "general": set(),
@@ -108,6 +111,12 @@ SIGNUP_WINDOW_SECONDS = env_int("CHAT_SIGNUP_WINDOW_SECONDS", 60 * 60)
 MAX_DLP_VIOLATIONS = env_int("CHAT_MAX_DLP_VIOLATIONS", 3)
 MAX_MESSAGE_LENGTH = env_int("CHAT_MAX_MESSAGE_LENGTH", 500)
 TOKEN_TTL_SECONDS = env_int("CHAT_TOKEN_TTL_SECONDS", 60 * 60)
+# How often expired sessions are swept out of active_tokens.
+TOKEN_CLEANUP_SECONDS = env_int("CHAT_TOKEN_CLEANUP_SECONDS", 300)
+# Connections the operating system may hold while REST threads are busy.
+HTTP_BACKLOG = env_int("CHAT_HTTP_BACKLOG", 128)
+# How long a database call waits for another writer before giving up.
+DB_BUSY_TIMEOUT_MS = env_int("CHAT_DB_BUSY_TIMEOUT_MS", 5_000)
 
 # These are not read from .env. Lowering them would weaken how accounts are
 # protected, and that should be a reviewed code change rather than a setting.
@@ -281,10 +290,36 @@ def setup_logging() -> None:
     )
 
 
+def connect_database(path: Path) -> sqlite3.Connection:
+    """Open SQLite with the settings the whole project depends on."""
+    connection = sqlite3.connect(
+        path,
+        timeout=DB_BUSY_TIMEOUT_MS / 1000,
+        check_same_thread=False,
+    )
+    # WAL lets readers carry on while a message is being written, and NORMAL
+    # drops the fsync from every commit. A power cut can lose the last few
+    # commits; a crash of this process cannot, and neither can corrupt the file.
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    return connection
+
+
+@contextmanager
+def database_connection() -> Iterator[sqlite3.Connection]:
+    """Open a short-lived connection that is always committed and closed."""
+    connection = connect_database(DB_PATH)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def init_database() -> None:
     """Create the database tables if they do not exist yet."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DB_PATH) as connection:
+    with database_connection() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -331,7 +366,7 @@ def create_user(username: str, password: str) -> bool:
     password_hash = hash_password(password, salt)
 
     try:
-        with sqlite3.connect(DB_PATH) as connection:
+        with database_connection() as connection:
             connection.execute(
                 """
                 INSERT INTO users (username, password_salt, password_hash, password_iterations)
@@ -358,7 +393,7 @@ def validate_username(username: str) -> str | None:
 
 def check_login(username: str, password: str) -> bool:
     """Return True only when the username exists and the password matches."""
-    with sqlite3.connect(DB_PATH) as connection:
+    with database_connection() as connection:
         row = connection.execute(
             """
             SELECT password_salt, password_hash, password_iterations
@@ -401,32 +436,113 @@ def allow_event(key: object, limit: int, window_seconds: int) -> bool:
 def create_token(username: str) -> str:
     """Create a short-lived bearer token for an authenticated user."""
     token = secrets.token_urlsafe(32)
-    active_tokens[token] = TokenSession(username, time.monotonic() + TOKEN_TTL_SECONDS)
+    with token_lock:
+        active_tokens[token] = TokenSession(username, time.monotonic() + TOKEN_TTL_SECONDS)
     return token
 
 
 def get_token_username(token: str) -> str | None:
     """Return a username only for a valid, unexpired token."""
-    session = active_tokens.get(token)
-    if session is None:
-        return None
-    if session.expires_at <= time.monotonic():
-        active_tokens.pop(token, None)
-        return None
-    return session.username
+    with token_lock:
+        session = active_tokens.get(token)
+        if session is None:
+            return None
+        if session.expires_at <= time.monotonic():
+            active_tokens.pop(token, None)
+            return None
+        return session.username
 
 
-def save_message(username: str, room_name: str, content: str) -> None:
-    """Save a chat message with a UTC timestamp."""
-    created_at = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as connection:
-        connection.execute(
-            """
-            INSERT INTO messages (username, room, content, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (username, room_name, content, created_at),
-        )
+def purge_expired_tokens() -> int:
+    """Drop every expired session and return how many were removed.
+
+    Sessions were only ever dropped when that exact token was looked up again,
+    so a user who closed the tab left an entry behind until the server stopped.
+    """
+    now = time.monotonic()
+    with token_lock:
+        expired = [token for token, session in active_tokens.items() if session.expires_at <= now]
+        for token in expired:
+            active_tokens.pop(token, None)
+    return len(expired)
+
+
+async def purge_expired_tokens_periodically() -> None:
+    """Sweep expired sessions on a timer: one task in total, not one per token."""
+    while True:
+        await asyncio.sleep(TOKEN_CLEANUP_SECONDS)
+        removed = purge_expired_tokens()
+        if removed:
+            logging.info("Expired sessions removed: count=%d", removed)
+
+
+class MessageWriter:
+    """Own the single SQLite connection the chat message stream writes through.
+
+    Opening a connection and forcing a full fsync for every message costs about
+    two milliseconds, and save_message runs on the event loop, so every client
+    waited for it. One connection kept open in WAL mode turns that into a few
+    microseconds. The lock keeps it safe to call from any thread.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._connection: sqlite3.Connection | None = None
+        self._path: Path | None = None
+
+    def save(self, username: str, room_name: str, content: str) -> int | None:
+        """Store one message and return its row id, raising on a database error."""
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            connection = self._connection_for(DB_PATH)
+            try:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO messages (username, room, content, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (username, room_name, content, created_at),
+                )
+                connection.commit()
+            except sqlite3.Error:
+                with suppress(sqlite3.Error):
+                    connection.rollback()
+                raise
+            return cursor.lastrowid
+
+    def close(self) -> None:
+        """Commit anything outstanding and let SQLite tidy the WAL file."""
+        with self._lock:
+            self._close_connection()
+
+    def _connection_for(self, path: Path) -> sqlite3.Connection:
+        # Tests and tools point DB_PATH at another file, so follow it.
+        if self._connection is not None and self._path != path:
+            self._close_connection()
+        if self._connection is None:
+            self._connection = connect_database(path)
+            self._path = path
+        return self._connection
+
+    def _close_connection(self) -> None:
+        if self._connection is None:
+            return
+        try:
+            self._connection.commit()
+            self._connection.close()
+        except sqlite3.Error:
+            logging.exception("Could not close the message database cleanly")
+        finally:
+            self._connection = None
+            self._path = None
+
+
+message_writer = MessageWriter()
+
+
+def save_message(username: str, room_name: str, content: str) -> int | None:
+    """Save a chat message with a UTC timestamp and return its row id."""
+    return message_writer.save(username, room_name, content)
 
 
 class RestRequestHandler(BaseHTTPRequestHandler):
@@ -603,9 +719,24 @@ class RestRequestHandler(BaseHTTPRequestHandler):
         logging.info("REST %s - %s", self.address_string(), format % args)
 
 
+class ChatHTTPServer(ThreadingHTTPServer):
+    """REST server with an accept queue deep enough for a class signing in.
+
+    Every login spends about a fifth of a second hashing a password, so with
+    the default queue of five, connections were reset before anything had a
+    chance to accept them.
+    """
+
+    request_queue_size = HTTP_BACKLOG
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        """Record a failed request instead of printing it to standard error."""
+        logging.exception("Unhandled error while serving a REST request")
+
+
 def start_rest_server() -> None:
     """Start the REST server in a background thread."""
-    http_server = ThreadingHTTPServer((CHAT_BIND_HOST, REST_PORT), RestRequestHandler)
+    http_server = ChatHTTPServer((CHAT_BIND_HOST, REST_PORT), RestRequestHandler)
     logging.info("REST API running at http://%s:%d", CHAT_BIND_HOST, REST_PORT)
     if (WEB_DIST / "index.html").is_file():
         for host in WEB_HOSTS:
@@ -800,9 +931,22 @@ async def chat(websocket: "ServerConnection") -> None:
                     return
                 continue
 
-            save_message(username, room_name, message)
+            try:
+                message_id = save_message(username, room_name, message)
+            except sqlite3.Error:
+                # Never broadcast a message the database did not accept.
+                logging.exception("Database write failed: user=%s room=%s", username, room_name)
+                await websocket.send("Message rejected: the server could not save it")
+                continue
+
             chat_message = f"[{room_name}] {username}: {message}"
-            logging.info("Message saved: user=%s room=%s length=%d", username, room_name, len(message))
+            logging.info(
+                "Message saved: user=%s room=%s id=%s length=%d",
+                username,
+                room_name,
+                message_id,
+                len(message),
+            )
             await broadcast_to_room(room_name, chat_message)
     finally:
         clients.discard(websocket)
@@ -828,21 +972,29 @@ async def main() -> None:
     rest_thread = Thread(target=start_rest_server, daemon=True)
     rest_thread.start()
 
-    async with websockets.serve(
-        chat,
-        CHAT_BIND_HOST,
-        CHAT_PORT,
-        max_size=MAX_JSON_BODY_BYTES,
-        max_queue=16,
-        open_timeout=10,
-        ping_interval=20,
-        ping_timeout=20,
-        # None keeps the CLI client working; the listed origins let the browser
-        # UI connect. Any other page's origin is refused.
-        origins=[None, *ALLOWED_WEB_ORIGINS],
-    ):
-        logging.info("Chat server running on port %d", CHAT_PORT)
-        await asyncio.Future()  # run forever
+    cleanup_task = asyncio.create_task(purge_expired_tokens_periodically())
+    try:
+        async with websockets.serve(
+            chat,
+            CHAT_BIND_HOST,
+            CHAT_PORT,
+            max_size=MAX_JSON_BODY_BYTES,
+            max_queue=16,
+            open_timeout=10,
+            ping_interval=20,
+            ping_timeout=20,
+            # None keeps the CLI client working; the listed origins let the
+            # browser UI connect. Any other page's origin is refused.
+            origins=[None, *ALLOWED_WEB_ORIGINS],
+        ):
+            logging.info("Chat server running on port %d", CHAT_PORT)
+            await asyncio.Future()  # run forever
+    finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
+        message_writer.close()
+        logging.info("Chat server stopped")
 
 
 if __name__ == "__main__":
