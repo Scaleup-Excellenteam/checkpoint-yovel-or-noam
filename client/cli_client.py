@@ -5,7 +5,7 @@ import os
 from getpass import getpass
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import websockets
@@ -36,6 +36,12 @@ def normalize_choice(value: str, valid_choices: tuple[str, ...], label: str) -> 
 
 def post_json(rest_uri: str, path: str, payload: dict[str, str]) -> dict[str, str]:
     """Send a JSON POST request to the REST API and return the JSON response."""
+    parsed_uri = urlparse(rest_uri)
+    if parsed_uri.scheme not in {"http", "https"} or not parsed_uri.netloc:
+        raise ValueError("REST server address must start with http:// or https://")
+    if not path.startswith("/"):
+        raise ValueError("REST API path must start with /")
+
     request_body = json.dumps(payload).encode("utf-8")
     request = Request(
         f"{rest_uri}{path}",
@@ -45,11 +51,14 @@ def post_json(rest_uri: str, path: str, payload: dict[str, str]) -> dict[str, st
     )
 
     try:
-        with urlopen(request) as response:
+        # The scheme and host are checked above; the address is supplied by the user.
+        with urlopen(request, timeout=10) as response:  # nosec B310
             response_body = response.read().decode("utf-8")
     except HTTPError as error:
         error_body = error.read().decode("utf-8")
         raise RuntimeError(error_body) from error
+    except (URLError, TimeoutError) as error:
+        raise RuntimeError("Cannot reach the chat server. Check the server address and network.") from error
 
     return json.loads(response_body)
 

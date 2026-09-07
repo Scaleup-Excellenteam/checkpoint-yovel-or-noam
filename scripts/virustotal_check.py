@@ -14,6 +14,7 @@ import time
 import uuid
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 API_BASE_URL = "https://www.virustotal.com/api/v3"
@@ -30,11 +31,14 @@ def sha256_file(path: Path) -> str:
 
 def api_request(url: str, api_key: str, data: bytes | None = None, content_type: str | None = None) -> dict:
     """Call VirusTotal and decode its JSON response."""
+    parsed_url = urlparse(url)
+    if parsed_url.scheme != "https" or parsed_url.netloc != "www.virustotal.com":
+        raise ValueError("VirusTotal requests must use https://www.virustotal.com")
     headers = {"x-apikey": api_key}
     if content_type:
         headers["Content-Type"] = content_type
     request = Request(url, data=data, headers=headers, method="POST" if data else "GET")
-    with urlopen(request, timeout=30) as response:
+    with urlopen(request, timeout=30) as response:  # nosec B310
         return json.loads(response.read().decode("utf-8"))
 
 

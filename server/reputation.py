@@ -30,7 +30,8 @@ def fetch_virustotal_report(ip: str, api_key: str) -> dict:
         headers={"x-apikey": api_key},
         method="GET",
     )
-    with urlopen(request, timeout=10) as response:
+    # This URL is a fixed HTTPS VirusTotal endpoint, not user-controlled input.
+    with urlopen(request, timeout=10) as response:  # nosec B310
         return json.loads(response.read().decode("utf-8"))
 
 

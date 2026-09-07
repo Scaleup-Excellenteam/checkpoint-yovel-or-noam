@@ -61,6 +61,9 @@ LOGIN_WINDOW_SECONDS = 60
 MAX_SIGNUPS_PER_WINDOW = 3
 SIGNUP_WINDOW_SECONDS = 60 * 60
 MAX_DLP_VIOLATIONS = 3
+# Accept only this computer by default. The server operator must explicitly
+# enable a LAN binding for the two-computer demo.
+CHAT_BIND_HOST = os.getenv("CHAT_BIND_HOST", "127.0.0.1")
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
 VALID_ROOMS = tuple(rooms.keys())
 request_history: dict[tuple[str, str], deque[float]] = defaultdict(deque)
@@ -385,8 +388,8 @@ class RestRequestHandler(BaseHTTPRequestHandler):
 
 def start_rest_server() -> None:
     """Start the REST server in a background thread."""
-    http_server = ThreadingHTTPServer(("0.0.0.0", 8000), RestRequestHandler)
-    logging.info("REST API running at http://0.0.0.0:8000")
+    http_server = ThreadingHTTPServer((CHAT_BIND_HOST, 8000), RestRequestHandler)
+    logging.info("REST API running at http://%s:8000", CHAT_BIND_HOST)
     http_server.serve_forever()
 
 
@@ -602,7 +605,7 @@ async def main() -> None:
 
     async with websockets.serve(
         chat,
-        "0.0.0.0",
+        CHAT_BIND_HOST,
         8765,
         max_size=MAX_JSON_BODY_BYTES,
         max_queue=16,

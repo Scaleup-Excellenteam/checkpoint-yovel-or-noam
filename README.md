@@ -32,8 +32,14 @@ On the laptop that hosts the server:
 
 ```powershell
 cd "C:\Users\Admin\Desktop\Bootcamp\checkPointProject\checkpoint-yovel-or-noam"
+# Required only for the two-computer demo: accept LAN connections explicitly.
+$env:CHAT_BIND_HOST="0.0.0.0"
 python server\server.py
 ```
+
+By default, the server accepts only local connections (`127.0.0.1`). The command
+above opens it to the local network for the two-computer demo; do not use that
+setting on a public or untrusted network.
 
 ## Find The Server IP
 
@@ -113,7 +119,7 @@ python -m pip_audit
 
 The server also enforces these protections:
 
-- New usernames are 3-32 letters, numbers, `_`, or `-`; new passwords are 8-128 characters.
+- New usernames are 3-16 letters, numbers, `_`, or `-`; new passwords are 8-128 characters.
 - Password hashes use PBKDF2-HMAC-SHA256 with 600,000 iterations. Old accounts continue to work with their original hash cost.
 - Login attempts, signups, WebSocket connections, and message speed are rate-limited.
 - Tokens expire after one hour; HTTP request bodies and WebSocket messages have size limits.
