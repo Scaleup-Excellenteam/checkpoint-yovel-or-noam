@@ -2,11 +2,13 @@ import asyncio
 import difflib
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import time
 from collections import defaultdict, deque
@@ -16,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock, Thread
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote, urlsplit
 
 import websockets
 from dlp import DLPScanner
@@ -42,6 +45,8 @@ rooms: dict[str, set["ServerConnection"]] = {
     "secret-pizza": set(),
 }
 client_rooms: dict["ServerConnection", str] = {}
+# The caller address behind each live socket, used for the per-IP connection cap.
+connection_ips: dict["ServerConnection", str] = {}
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data" / "chat.db"
 LOG_PATH = BASE_DIR / "logs" / "app.log"
@@ -66,6 +71,38 @@ MAX_DLP_VIOLATIONS = 3
 CHAT_BIND_HOST = os.getenv("CHAT_BIND_HOST", "127.0.0.1")
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,16}$")
 VALID_ROOMS = tuple(rooms.keys())
+REST_PORT = 8000
+CHAT_PORT = 8765
+# The React client in web/ is compiled into web/dist by `npm run build`.
+WEB_DIST = BASE_DIR / "web" / "dist"
+# Only these file types are served, so an unexpected file cannot be downloaded.
+STATIC_CONTENT_TYPES = {
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".webmanifest": "application/manifest+json",
+    ".woff2": "font/woff2",
+}
+# The Vite dev server and `npm run preview`. They only ever run on this computer.
+WEB_DEV_ORIGINS = tuple(
+    f"http://{host}:{port}"
+    for host in ("localhost", "127.0.0.1")
+    for port in (5173, 4173)
+)
+# Set when the app runs behind a TLS reverse proxy, for example
+# CHAT_PUBLIC_ORIGIN="https://chat.example.com".
+CHAT_PUBLIC_ORIGIN = os.getenv("CHAT_PUBLIC_ORIGIN", "").strip().rstrip("/")
+# The proxy forwards this path to the chat port, so the browser only needs 443.
+WEBSOCKET_PROXY_PATH = "/ws"
+# Behind a proxy every connection arrives from the proxy itself, so the real
+# caller has to be read from X-Forwarded-For. That header is only trusted when
+# the connection really came from the local proxy; otherwise a caller could
+# forge an address and walk past the rate limits and the Anti-Bot check.
+TRUST_PROXY = os.getenv("CHAT_TRUST_PROXY", "0") == "1"
+TRUSTED_PROXY_IPS = frozenset({"127.0.0.1", "::1"})
 request_history: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 message_history: dict["ServerConnection", deque[float]] = defaultdict(deque)
 dlp_violations: dict["ServerConnection", int] = defaultdict(int)
@@ -90,6 +127,103 @@ def load_virustotal_api_key() -> None:
 
 load_virustotal_api_key()
 reputation_checker = IPReputationChecker()
+
+
+def detect_lan_ip() -> str | None:
+    """Return this computer's LAN address without sending any network traffic."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            # TEST-NET-1 is never routed; this only asks the OS which interface
+            # it would use, so no packet leaves the computer.
+            probe.connect(("192.0.2.1", 9))
+            return probe.getsockname()[0]
+        except OSError:
+            return None
+
+
+def real_client_ip(peer_ip: str, forwarded_for: str | None) -> str:
+    """Return the address to rate-limit and reputation-check for one caller."""
+    if not TRUST_PROXY or peer_ip not in TRUSTED_PROXY_IPS or not forwarded_for:
+        return peer_ip
+    # The proxy appends the address it actually saw, so the last entry is the
+    # only one the caller cannot choose.
+    return forwarded_for.rsplit(",", 1)[-1].strip() or peer_ip
+
+
+def websocket_client_ip(websocket: "ServerConnection") -> str:
+    """Find the caller's address for a WebSocket, proxy or no proxy."""
+    remote_address = websocket.remote_address
+    peer_ip = remote_address[0] if remote_address else "unknown"
+    request = getattr(websocket, "request", None)
+    forwarded_for = request.headers.get("X-Forwarded-For") if request is not None else None
+    return real_client_ip(peer_ip, forwarded_for)
+
+
+def binds_every_interface(host: str) -> bool:
+    """True when the server was told to listen on every network interface."""
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return False
+
+
+def build_web_hosts() -> list[str]:
+    """List every address the browser UI is allowed to be opened from."""
+    hosts = ["localhost", "127.0.0.1"]
+    # A wildcard bind is the two-computer demo, so find the address to advertise.
+    if binds_every_interface(CHAT_BIND_HOST):
+        lan_ip = detect_lan_ip()
+        if lan_ip is not None and lan_ip not in hosts:
+            hosts.append(lan_ip)
+    elif CHAT_BIND_HOST not in hosts:
+        hosts.append(CHAT_BIND_HOST)
+
+    for extra_host in os.getenv("CHAT_WEB_HOSTS", "").split(","):
+        clean_host = extra_host.strip()
+        if clean_host and clean_host not in hosts:
+            hosts.append(clean_host)
+    return hosts
+
+
+WEB_HOSTS = build_web_hosts()
+# A browser always sends an Origin header, so the WebSocket server needs the
+# exact origins the UI is served from. It is never a wildcard: any other page
+# that tries to open a socket for a logged-in user is still rejected.
+ALLOWED_WEB_ORIGINS = [f"http://{host}:{REST_PORT}" for host in WEB_HOSTS]
+ALLOWED_WEB_ORIGINS.extend(WEB_DEV_ORIGINS)
+WEBSOCKET_SOURCES = [f"ws://{host}:{CHAT_PORT}" for host in WEB_HOSTS]
+if CHAT_PUBLIC_ORIGIN:
+    # Behind the proxy the page is https:// and the socket is wss:// on port 443.
+    ALLOWED_WEB_ORIGINS.append(CHAT_PUBLIC_ORIGIN)
+    WEBSOCKET_SOURCES.append("wss://" + urlsplit(CHAT_PUBLIC_ORIGIN).netloc)
+CONTENT_SECURITY_POLICY = "; ".join(
+    (
+        "default-src 'self'",
+        "connect-src 'self' " + " ".join(WEBSOCKET_SOURCES),
+        "img-src 'self' data:",
+        "style-src 'self'",
+        "script-src 'self'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    )
+)
+
+
+def resolve_web_file(url_path: str) -> Path | None:
+    """Map a URL path to one file inside web/dist, or None when it is not servable."""
+    relative_path = unquote(url_path).lstrip("/")
+    if not relative_path or relative_path.endswith("/"):
+        relative_path = "index.html"
+
+    web_root = WEB_DIST.resolve()
+    candidate = (web_root / relative_path).resolve()
+    # resolve() collapses "..", so a path outside web/dist is rejected here.
+    if not candidate.is_relative_to(web_root) or not candidate.is_file():
+        return None
+    if candidate.suffix not in STATIC_CONTENT_TYPES:
+        return None
+    return candidate
 
 
 def setup_logging() -> None:
@@ -257,23 +391,59 @@ class RestRequestHandler(BaseHTTPRequestHandler):
     """Handle the small REST API required by the project."""
 
     def do_GET(self) -> None:
-        if self.path != "/health":
+        route = urlsplit(self.path).path
+
+        if route == "/health":
+            self.send_json(
+                {
+                    "status": "ok",
+                    "service": "tspo-chat",
+                    "connected_clients": len(clients),
+                    "rooms": {room_name: len(members) for room_name, members in rooms.items()},
+                    "websocket_port": CHAT_PORT,
+                    # Behind the proxy the browser uses wss://host/ws on port 443.
+                    "websocket_path": WEBSOCKET_PROXY_PATH if CHAT_PUBLIC_ORIGIN else None,
+                }
+            )
+            return
+
+        web_file = resolve_web_file(route)
+        if web_file is not None:
+            self.send_web_file(web_file)
+            return
+
+        if route == "/" or route == "/index.html":
+            logging.warning("Web UI is not built yet; run 'npm install && npm run build' in web/")
+            self.send_error(503, "Web UI is not built")
+            return
+
+        self.send_error(404, "Not Found")
+
+    def send_web_file(self, file_path: Path) -> None:
+        """Serve one built file from web/dist with browser security headers."""
+        try:
+            body = file_path.read_bytes()
+        except OSError:
+            logging.error("Cannot read web file: %s", file_path.name)
             self.send_error(404, "Not Found")
             return
 
-        response = {
-            "status": "ok",
-            "service": "tspo-chat",
-            "connected_clients": len(clients),
-            "rooms": {room_name: len(members) for room_name, members in rooms.items()},
-        }
-        response_body = json.dumps(response).encode("utf-8")
+        # Vite puts a content hash in every asset name, so those never go stale.
+        is_hashed_asset = file_path.parent.name == "assets"
 
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(response_body)))
+        self.send_header("Content-Type", STATIC_CONTENT_TYPES[file_path.suffix])
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header(
+            "Cache-Control",
+            "public, max-age=31536000, immutable" if is_hashed_asset else "no-store",
+        )
+        self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
-        self.wfile.write(response_body)
+        self.wfile.write(body)
 
     def do_POST(self) -> None:
         if self.path == "/signup":
@@ -291,7 +461,7 @@ class RestRequestHandler(BaseHTTPRequestHandler):
         if request_data is None:
             self.send_json({"error": "request body must be valid JSON and at most 4096 bytes"}, 400)
             return
-        client_ip = self.client_address[0]
+        client_ip = self.caller_ip()
         if not allow_event(("signup", client_ip), MAX_SIGNUPS_PER_WINDOW, SIGNUP_WINDOW_SECONDS):
             logging.warning("Signup rate limit exceeded for IP %s", client_ip)
             self.send_json({"error": "too many signup attempts; try again later"}, 429)
@@ -321,7 +491,7 @@ class RestRequestHandler(BaseHTTPRequestHandler):
         if request_data is None:
             self.send_json({"error": "request body must be valid JSON and at most 4096 bytes"}, 400)
             return
-        client_ip = self.client_address[0]
+        client_ip = self.caller_ip()
         if not allow_event(("login", client_ip), MAX_LOGIN_ATTEMPTS_PER_WINDOW, LOGIN_WINDOW_SECONDS):
             logging.warning("Login rate limit exceeded for IP %s", client_ip)
             self.send_json({"error": "too many login attempts; try again later"}, 429)
@@ -352,6 +522,10 @@ class RestRequestHandler(BaseHTTPRequestHandler):
 
         logging.info("User logged in: %s", username)
         self.send_json({"status": "ok", "username": username, "token": token})
+
+    def caller_ip(self) -> str:
+        """The address of the person making the request, proxy or no proxy."""
+        return real_client_ip(self.client_address[0], self.headers.get("X-Forwarded-For"))
 
     def read_json_body(self) -> dict[str, Any] | None:
         try:
@@ -388,8 +562,15 @@ class RestRequestHandler(BaseHTTPRequestHandler):
 
 def start_rest_server() -> None:
     """Start the REST server in a background thread."""
-    http_server = ThreadingHTTPServer((CHAT_BIND_HOST, 8000), RestRequestHandler)
-    logging.info("REST API running at http://%s:8000", CHAT_BIND_HOST)
+    http_server = ThreadingHTTPServer((CHAT_BIND_HOST, REST_PORT), RestRequestHandler)
+    logging.info("REST API running at http://%s:%d", CHAT_BIND_HOST, REST_PORT)
+    if (WEB_DIST / "index.html").is_file():
+        for host in WEB_HOSTS:
+            logging.info("Web UI available at http://%s:%d", host, REST_PORT)
+    else:
+        logging.warning(
+            "Web UI is not built. Run 'npm install' and 'npm run build' inside web/ to enable it."
+        )
     http_server.serve_forever()
 
 
@@ -496,20 +677,18 @@ async def join_room(websocket: "ServerConnection") -> str | None:
 
 async def chat(websocket: "ServerConnection") -> None:
     """Receive messages from one client and share them with everyone."""
-    remote_address = websocket.remote_address
-    client_ip = remote_address[0] if remote_address else "unknown"
+    client_ip = websocket_client_ip(websocket)
     if len(connected_sockets) >= MAX_CONNECTIONS:
         await websocket.close(1013, "Server is busy")
         return
-    if sum(
-        1
-        for socket in connected_sockets
-        if socket.remote_address and socket.remote_address[0] == client_ip
-    ) >= MAX_CONNECTIONS_PER_IP:
+    # Count the callers themselves. Behind a proxy every socket looks like it
+    # comes from the proxy, so comparing peer addresses would cap the whole site.
+    if sum(1 for ip in connection_ips.values() if ip == client_ip) >= MAX_CONNECTIONS_PER_IP:
         await websocket.close(1008, "Too many connections from this IP")
         return
 
     connected_sockets.add(websocket)
+    connection_ips[websocket] = client_ip
     username: str | None = None
     room_name: str | None = None
     try:
@@ -585,6 +764,7 @@ async def chat(websocket: "ServerConnection") -> None:
     finally:
         clients.discard(websocket)
         connected_sockets.discard(websocket)
+        connection_ips.pop(websocket, None)
         if room_name is not None:
             rooms[room_name].discard(websocket)
         client_rooms.pop(websocket, None)
@@ -606,15 +786,17 @@ async def main() -> None:
     async with websockets.serve(
         chat,
         CHAT_BIND_HOST,
-        8765,
+        CHAT_PORT,
         max_size=MAX_JSON_BODY_BYTES,
         max_queue=16,
         open_timeout=10,
         ping_interval=20,
         ping_timeout=20,
-        origins=[None],
+        # None keeps the CLI client working; the listed origins let the browser
+        # UI connect. Any other page's origin is refused.
+        origins=[None, *ALLOWED_WEB_ORIGINS],
     ):
-        logging.info("Chat server running on port 8765")
+        logging.info("Chat server running on port %d", CHAT_PORT)
         await asyncio.Future()  # run forever
 
 
