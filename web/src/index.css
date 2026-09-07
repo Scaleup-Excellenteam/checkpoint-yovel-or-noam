@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+/* Brand palette shared with docs/security-implementation.html. */
+@theme {
+  --color-plum-50: #f7f3f6;
+  --color-plum-100: #f4e9ef;
+  --color-plum-200: #eadfe5;
+  --color-plum-300: #cbb9c5;
+  --color-plum-400: #8d7d90;
+  --color-plum-500: #6f6273;
+  --color-plum-600: #49263f;
+  --color-plum-700: #3a2033;
+  --color-plum-800: #2e2430;
+  --color-plum-850: #241c25;
+  --color-plum-900: #1d161f;
+  --color-plum-950: #17111a;
+
+  --color-magenta-300: #f19cc2;
+  --color-magenta-400: #ef5f9b;
+  --color-magenta-500: #df1470;
+  --color-magenta-600: #b81059;
+}
+
+@layer base {
+  html {
+    color-scheme: light dark;
+  }
+
+  body {
+    @apply bg-plum-50 text-plum-800 antialiased dark:bg-plum-950 dark:text-plum-50;
+  }
+
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-magenta-500;
+  }
+}
