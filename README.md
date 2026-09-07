@@ -71,9 +71,37 @@ file holds defaults. Restart the server after editing.
 | `CHAT_PUBLIC_ORIGIN` | empty | Public address when behind a TLS proxy |
 | `CHAT_TRUST_PROXY` | 0 | Read the caller address from the proxy |
 | `VIRUSTOTAL_API_KEY` | empty | Enables the Anti-Bot reputation check |
+| `CHAT_HTTP_BACKLOG` | 128 | Connections queued while REST threads are busy |
+| `CHAT_TOKEN_CLEANUP_SECONDS` | 300 | How often expired sessions are swept |
+| `CHAT_DB_BUSY_TIMEOUT_MS` | 5000 | How long a database call waits for another writer |
+| `CHAT_LOG_LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, or CRITICAL |
+| `CHAT_LOG_DIR` | `logs/` | Where `app.log` is written; created if missing |
+| `CHAT_LOG_RETENTION_DAYS` | 14 | Days of rotated logs to keep |
+| `CHAT_LOG_COMPRESS` | 1 | Gzip each rotated day |
 
 A value that is not a whole number, or is below the smallest sensible number, is
 ignored: the default is used and the reason is written to the log at startup.
+
+### Logs
+
+Logs go to the terminal and to `logs/app.log`. The file rotates at midnight UTC
+and old days are compressed to `app.log.YYYY-MM-DD.gz`, keeping
+`CHAT_LOG_RETENTION_DAYS` of them. Each line carries the time, the severity, the
+logger name, and the details of the event:
+
+```text
+2026-09-07 12:41:03 INFO tspo.chat Client connected: user=noam room=general ip=10.0.0.5
+```
+
+Passwords, password hashes, tokens, and request bodies are never written. Chat
+text is never written either: a saved message is recorded at DEBUG as its room,
+sender, row id, and size. Values that came from a client have their control
+characters replaced, so nobody can add invented lines to the log.
+
+Startup and shutdown, connections and disconnections, sign-ups, successful and
+failed logins, DLP blocks, database failures, broadcast failures, session
+cleanup, and unhandled errors are all recorded. Per-message and per-request
+lines are at DEBUG, so `CHAT_LOG_LEVEL=INFO` stays readable on a busy server.
 
 The browser UI reads `CHAT_MAX_MESSAGE_LENGTH` from `/health`, so the counter
 under the message box always matches the server.

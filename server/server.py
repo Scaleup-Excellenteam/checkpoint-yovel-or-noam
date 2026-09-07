@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import gzip
 import hashlib
 import hmac
 import ipaddress
@@ -8,6 +9,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import socket
 import sqlite3
 import time
@@ -16,12 +18,16 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from threading import Lock, Thread
 from typing import TYPE_CHECKING, Any, Iterator
 from urllib.parse import unquote, urlsplit
 
 import websockets
+# websockets loads its submodules lazily, so name this one explicitly: the
+# broadcast error check below refers to it before anything else has.
+import websockets.exceptions
 from dlp import DLPScanner
 from reputation import IPReputationChecker
 
@@ -52,7 +58,6 @@ client_rooms: dict["ServerConnection", str] = {}
 connection_ips: dict["ServerConnection", str] = {}
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "data" / "chat.db"
-LOG_PATH = BASE_DIR / "logs" / "app.log"
 # Problems found while reading settings. main() logs them once logging is set up.
 config_warnings: list[str] = []
 
@@ -99,6 +104,24 @@ def env_int(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
+def env_text(name: str, default: str) -> str:
+    """Read a text setting, keeping the default when it is blank."""
+    return os.getenv(name, "").strip() or default
+
+
+def env_flag(name: str, default: bool) -> bool:
+    """Read an on/off setting written as 1/0, true/false, or yes/no."""
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    config_warnings.append(f"{name}={value!r} is not on or off; using {default}")
+    return default
+
+
 # These describe how much traffic the server accepts and can be tuned in .env.
 MAX_CONNECTIONS = env_int("CHAT_MAX_CONNECTIONS", 100)
 MAX_CONNECTIONS_PER_IP = env_int("CHAT_MAX_CONNECTIONS_PER_IP", 5)
@@ -117,6 +140,34 @@ TOKEN_CLEANUP_SECONDS = env_int("CHAT_TOKEN_CLEANUP_SECONDS", 300)
 HTTP_BACKLOG = env_int("CHAT_HTTP_BACKLOG", 128)
 # How long a database call waits for another writer before giving up.
 DB_BUSY_TIMEOUT_MS = env_int("CHAT_DB_BUSY_TIMEOUT_MS", 5_000)
+
+# Where logs are written, how much is written, and how long it is kept.
+LOG_DIR = Path(env_text("CHAT_LOG_DIR", str(BASE_DIR / "logs")))
+LOG_PATH = LOG_DIR / "app.log"
+LOG_LEVEL_NAME = env_text("CHAT_LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = logging.getLevelNamesMapping().get(LOG_LEVEL_NAME)
+if LOG_LEVEL is None:
+    config_warnings.append(f"CHAT_LOG_LEVEL={LOG_LEVEL_NAME!r} is not a level name; using INFO")
+    LOG_LEVEL = logging.INFO
+LOG_RETENTION_DAYS = env_int("CHAT_LOG_RETENTION_DAYS", 14)
+LOG_COMPRESS = env_flag("CHAT_LOG_COMPRESS", True)
+# Anything a client chose is shortened to this before it reaches a log line.
+MAX_LOGGED_VALUE_LENGTH = 64
+LOG_UNSAFE_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+logger = logging.getLogger("tspo.chat")
+
+
+def log_safe(value: object, limit: int = MAX_LOGGED_VALUE_LENGTH) -> str:
+    """Make a value that came from a client safe to put in one log line.
+
+    Newlines and control characters would let someone add their own lines to
+    the log and forge entries, so they are replaced and the text is shortened.
+    """
+    text = LOG_UNSAFE_CHARACTERS.sub("?", str(value))
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
 
 # These are not read from .env. Lowering them would weaken how accounts are
 # protected, and that should be a reviewed code change rather than a setting.
@@ -277,17 +328,64 @@ def resolve_web_file(url_path: str) -> Path | None:
     return candidate
 
 
+def name_rotated_log(default_name: str) -> str:
+    """Add the .gz suffix to the file that compress_rotated_log will write."""
+    return default_name + ".gz"
+
+
+def compress_rotated_log(source: str, destination: str) -> None:
+    """Gzip yesterday's log, keeping it uncompressed rather than losing it."""
+    try:
+        with open(source, "rb") as plain, gzip.open(destination, "wb") as compressed:
+            shutil.copyfileobj(plain, compressed)
+    except OSError:
+        with suppress(OSError):
+            os.replace(source, destination.removesuffix(".gz"))
+        return
+    with suppress(OSError):
+        os.remove(source)
+
+
 def setup_logging() -> None:
-    """Write logs to the terminal and to logs/app.log."""
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        handlers=[
-            logging.FileHandler(LOG_PATH, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
+    """Write logs to the terminal and to a file that rotates every night."""
+    # A problem inside logging must never take the chat server down with it.
+    logging.raiseExceptions = False
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
+    root = logging.getLogger()
+    root.setLevel(LOG_LEVEL)
+    # Calling this twice must not write every line twice.
+    for existing in list(root.handlers):
+        root.removeHandler(existing)
+        if isinstance(existing, TimedRotatingFileHandler):
+            existing.close()
+
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        file_handler = TimedRotatingFileHandler(
+            LOG_PATH,
+            when="midnight",
+            backupCount=LOG_RETENTION_DAYS,
+            encoding="utf-8",
+            utc=True,
+        )
+    except OSError as error:
+        # The terminal still receives everything, so the server keeps running.
+        root.error("Cannot open the log file in %s: %s", LOG_DIR, error)
+        return
+
+    if LOG_COMPRESS:
+        file_handler.namer = name_rotated_log
+        file_handler.rotator = compress_rotated_log
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
 
 
 def connect_database(path: Path) -> sqlite3.Connection:
@@ -473,7 +571,7 @@ async def purge_expired_tokens_periodically() -> None:
         await asyncio.sleep(TOKEN_CLEANUP_SECONDS)
         removed = purge_expired_tokens()
         if removed:
-            logging.info("Expired sessions removed: count=%d", removed)
+            logger.info("Expired sessions removed: count=%d", removed)
 
 
 class MessageWriter:
@@ -531,7 +629,7 @@ class MessageWriter:
             self._connection.commit()
             self._connection.close()
         except sqlite3.Error:
-            logging.exception("Could not close the message database cleanly")
+            logger.exception("Could not close the message database cleanly")
         finally:
             self._connection = None
             self._path = None
@@ -572,7 +670,7 @@ class RestRequestHandler(BaseHTTPRequestHandler):
             return
 
         if route == "/" or route == "/index.html":
-            logging.warning("Web UI is not built yet; run 'npm install && npm run build' in web/")
+            logger.warning("Web UI is not built yet; run 'npm install && npm run build' in web/")
             self.send_error(503, "Web UI is not built")
             return
 
@@ -583,7 +681,7 @@ class RestRequestHandler(BaseHTTPRequestHandler):
         try:
             body = file_path.read_bytes()
         except OSError:
-            logging.error("Cannot read web file: %s", file_path.name)
+            logger.error("Cannot read web file: %s", file_path.name)
             self.send_error(404, "Not Found")
             return
 
@@ -622,7 +720,7 @@ class RestRequestHandler(BaseHTTPRequestHandler):
             return
         client_ip = self.caller_ip()
         if not allow_event(("signup", client_ip), MAX_SIGNUPS_PER_WINDOW, SIGNUP_WINDOW_SECONDS):
-            logging.warning("Signup rate limit exceeded for IP %s", client_ip)
+            logger.warning("Signup rate limit exceeded: ip=%s", log_safe(client_ip))
             self.send_json({"error": "too many signup attempts; try again later"}, 429)
             return
         username_value = request_data.get("username")
@@ -642,7 +740,7 @@ class RestRequestHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "username already exists"}, 409)
             return
 
-        logging.info("User signed up: %s", username)
+        logger.info("User signed up: user=%s ip=%s", log_safe(username), log_safe(client_ip))
         self.send_json({"status": "created", "username": username}, 201)
 
     def handle_login(self) -> None:
@@ -652,7 +750,7 @@ class RestRequestHandler(BaseHTTPRequestHandler):
             return
         client_ip = self.caller_ip()
         if not allow_event(("login", client_ip), MAX_LOGIN_ATTEMPTS_PER_WINDOW, LOGIN_WINDOW_SECONDS):
-            logging.warning("Login rate limit exceeded for IP %s", client_ip)
+            logger.warning("Login rate limit exceeded: ip=%s", log_safe(client_ip))
             self.send_json({"error": "too many login attempts; try again later"}, 429)
             return
 
@@ -674,12 +772,14 @@ class RestRequestHandler(BaseHTTPRequestHandler):
             return
 
         if not check_login(username, password):
+            # The password itself is never written anywhere.
+            logger.warning("Login failed: user=%s ip=%s", log_safe(username), log_safe(client_ip))
             self.send_json({"error": "invalid username or password"}, 401)
             return
 
         token = create_token(username)
 
-        logging.info("User logged in: %s", username)
+        logger.info("Login succeeded: user=%s ip=%s", log_safe(username), log_safe(client_ip))
         self.send_json({"status": "ok", "username": username, "token": token})
 
     def caller_ip(self) -> str:
@@ -716,7 +816,12 @@ class RestRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(response_body)
 
     def log_message(self, format: str, *args: object) -> None:
-        logging.info("REST %s - %s", self.address_string(), format % args)
+        """Record one request. This is high volume, so it stays at DEBUG."""
+        logger.debug("REST %s %s", log_safe(self.address_string()), log_safe(format % args, 200))
+
+    def log_error(self, format: str, *args: object) -> None:
+        """A refused or failed request is worth seeing at the normal level."""
+        logger.warning("REST %s %s", log_safe(self.address_string()), log_safe(format % args, 200))
 
 
 class ChatHTTPServer(ThreadingHTTPServer):
@@ -731,18 +836,18 @@ class ChatHTTPServer(ThreadingHTTPServer):
 
     def handle_error(self, request: object, client_address: object) -> None:
         """Record a failed request instead of printing it to standard error."""
-        logging.exception("Unhandled error while serving a REST request")
+        logger.exception("Unhandled error while serving a REST request")
 
 
 def start_rest_server() -> None:
     """Start the REST server in a background thread."""
     http_server = ChatHTTPServer((CHAT_BIND_HOST, REST_PORT), RestRequestHandler)
-    logging.info("REST API running at http://%s:%d", CHAT_BIND_HOST, REST_PORT)
+    logger.info("REST API running at http://%s:%d", CHAT_BIND_HOST, REST_PORT)
     if (WEB_DIST / "index.html").is_file():
         for host in WEB_HOSTS:
-            logging.info("Web UI available at http://%s:%d", host, REST_PORT)
+            logger.info("Web UI available at http://%s:%d", host, REST_PORT)
     else:
-        logging.warning(
+        logger.warning(
             "Web UI is not built. Run 'npm install' and 'npm run build' inside web/ to enable it."
         )
     http_server.serve_forever()
@@ -777,10 +882,10 @@ async def broadcast_to_room(room_name: str, message: str) -> None:
             continue
         if isinstance(outcome, websockets.exceptions.ConnectionClosed):
             forget_client(client, room_name)
-            logging.info("Removed disconnected client while broadcasting: room=%s", room_name)
+            logger.info("Removed disconnected client while broadcasting: room=%s", room_name)
         else:
             # Leave the connection to its own handler, which closes and tidies up.
-            logging.warning(
+            logger.warning(
                 "Broadcast to one client failed: room=%s error=%s",
                 room_name,
                 type(outcome).__name__,
@@ -816,6 +921,7 @@ def normalize_room_name(room_name: str) -> str | None:
 
 async def authenticate_websocket(websocket: "ServerConnection") -> str | None:
     """Read the first client message and return the logged-in username."""
+    client_ip = websocket_client_ip(websocket)
     try:
         auth_message = await websocket.recv()
         if not isinstance(auth_message, str):
@@ -823,6 +929,7 @@ async def authenticate_websocket(websocket: "ServerConnection") -> str | None:
             return None
         auth_data = json.loads(auth_message)
     except json.JSONDecodeError:
+        logger.warning("Authentication failed: ip=%s reason=invalid_json", log_safe(client_ip))
         await websocket.send("Authentication failed: invalid JSON")
         return None
 
@@ -832,14 +939,18 @@ async def authenticate_websocket(websocket: "ServerConnection") -> str | None:
 
     token = auth_data.get("token")
     if not isinstance(token, str):
+        logger.warning("Authentication failed: ip=%s reason=no_token", log_safe(client_ip))
         await websocket.send("Authentication failed: invalid token")
         return None
     username = get_token_username(token)
 
     if username is None:
+        # The token is a credential, so only the outcome is recorded.
+        logger.warning("Authentication failed: ip=%s reason=unknown_token", log_safe(client_ip))
         await websocket.send("Authentication failed: invalid token")
         return None
 
+    logger.debug("Authentication succeeded: user=%s ip=%s", log_safe(username), log_safe(client_ip))
     return username
 
 
@@ -893,18 +1004,18 @@ async def chat(websocket: "ServerConnection") -> None:
     try:
         reputation_decision = await asyncio.to_thread(reputation_checker.check_ip, client_ip)
         if not reputation_decision.allowed:
-            logging.warning(
+            logger.warning(
                 "Anti-bot blocked: ip=%s reason=%s",
-                client_ip,
+                log_safe(client_ip),
                 reputation_decision.reason_code,
             )
             await websocket.send(f"Connection blocked: {reputation_decision.reason_code}")
             await websocket.close(1008, "Anti-Bot reputation block")
             return
 
-        logging.info(
+        logger.debug(
             "Anti-bot allowed: ip=%s reason=%s",
-            client_ip,
+            log_safe(client_ip),
             reputation_decision.reason_code,
         )
         await websocket.send(f"Anti-Bot passed: {reputation_decision.reason_code}")
@@ -921,7 +1032,12 @@ async def chat(websocket: "ServerConnection") -> None:
 
         clients.add(websocket)
         authenticated_clients[websocket] = username
-        logging.info("Client connected: %s joined %s", username, room_name)
+        logger.info(
+            "Client connected: user=%s room=%s ip=%s",
+            log_safe(username),
+            log_safe(room_name),
+            log_safe(client_ip),
+        )
         await websocket.send(f"Welcome {username}! You joined room: {room_name}")
 
         # Share every message only with clients in the same room.
@@ -930,23 +1046,32 @@ async def chat(websocket: "ServerConnection") -> None:
                 await websocket.send("Message rejected: binary messages are not allowed")
                 continue
             if not allow_event(websocket, MAX_MESSAGES_PER_WINDOW, MESSAGE_WINDOW_SECONDS):
-                logging.warning("Message rate limit exceeded for user %s", username)
+                logger.warning(
+                    "Message rate limit exceeded: user=%s room=%s",
+                    log_safe(username),
+                    log_safe(room_name),
+                )
                 await websocket.send("Message rejected: sending messages too quickly")
                 await websocket.close(1008, "Message rate limit exceeded")
                 return
             validation_error = validate_chat_message(message)
             if validation_error is not None:
-                logging.info("%s sent an invalid message: %s", username, validation_error)
+                logger.info(
+                    "Message refused: user=%s room=%s reason=%s",
+                    log_safe(username),
+                    log_safe(room_name),
+                    validation_error,
+                )
                 await websocket.send(validation_error)
                 continue
 
             dlp_decision = dlp_scanner.scan(message)
             if not dlp_decision.allowed:
                 dlp_violations[websocket] += 1
-                logging.warning(
+                logger.warning(
                     "DLP blocked: user=%s room=%s reason=%s",
-                    username,
-                    room_name,
+                    log_safe(username),
+                    log_safe(room_name),
                     dlp_decision.reason_code,
                 )
                 await websocket.send(f"Message blocked: {dlp_decision.reason_code}")
@@ -960,19 +1085,39 @@ async def chat(websocket: "ServerConnection") -> None:
                 message_id = save_message(username, room_name, message)
             except sqlite3.Error:
                 # Never broadcast a message the database did not accept.
-                logging.exception("Database write failed: user=%s room=%s", username, room_name)
+                logger.exception(
+                    "Database write failed: user=%s room=%s",
+                    log_safe(username),
+                    log_safe(room_name),
+                )
                 await websocket.send("Message rejected: the server could not save it")
                 continue
 
             chat_message = f"[{room_name}] {username}: {message}"
-            logging.info(
-                "Message saved: user=%s room=%s id=%s length=%d",
-                username,
-                room_name,
+            logger.debug(
+                "Message saved: user=%s room=%s id=%s size=%d",
+                log_safe(username),
+                log_safe(room_name),
                 message_id,
                 len(message),
             )
             await broadcast_to_room(room_name, chat_message)
+    except websockets.exceptions.ConnectionClosedError as error:
+        logger.info(
+            "Client disconnected unexpectedly: user=%s room=%s code=%s",
+            log_safe(username),
+            log_safe(room_name),
+            error.code,
+        )
+    except TimeoutError:
+        logger.info("Handshake timed out: ip=%s", log_safe(client_ip))
+    except Exception:
+        # One broken connection must not be able to stop the server.
+        logger.exception(
+            "Unhandled error in the chat handler: user=%s room=%s",
+            log_safe(username),
+            log_safe(room_name),
+        )
     finally:
         clients.discard(websocket)
         connected_sockets.discard(websocket)
@@ -984,14 +1129,34 @@ async def chat(websocket: "ServerConnection") -> None:
         message_history.pop(websocket, None)
         dlp_violations.pop(websocket, None)
         if username is not None and room_name is not None:
-            logging.info("Client disconnected: %s left %s", username, room_name)
+            logger.info(
+                "Client disconnected: user=%s room=%s",
+                log_safe(username),
+                log_safe(room_name),
+            )
+
+
+def handle_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """Record a failure that no task was waiting on."""
+    logger.error(
+        "Unhandled error in the event loop: %s",
+        context.get("message", "no message"),
+        exc_info=context.get("exception"),
+    )
 
 
 async def main() -> None:
     """Start the chat server."""
     setup_logging()
+    asyncio.get_running_loop().set_exception_handler(handle_loop_exception)
+    logger.info(
+        "Chat server starting: pid=%d bind=%s log_level=%s",
+        os.getpid(),
+        CHAT_BIND_HOST,
+        LOG_LEVEL_NAME,
+    )
     for warning in config_warnings:
-        logging.warning("Setting ignored: %s", warning)
+        logger.warning("Setting ignored: %s", warning)
     init_database()
 
     rest_thread = Thread(target=start_rest_server, daemon=True)
@@ -1012,14 +1177,14 @@ async def main() -> None:
             # browser UI connect. Any other page's origin is refused.
             origins=[None, *ALLOWED_WEB_ORIGINS],
         ):
-            logging.info("Chat server running on port %d", CHAT_PORT)
+            logger.info("Chat server running on port %d", CHAT_PORT)
             await asyncio.Future()  # run forever
     finally:
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
         message_writer.close()
-        logging.info("Chat server stopped")
+        logger.info("Chat server stopped")
 
 
 if __name__ == "__main__":
