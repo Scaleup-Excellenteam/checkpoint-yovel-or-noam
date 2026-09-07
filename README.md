@@ -1,5 +1,7 @@
 # TSPO Chat
 
+[![CI](https://github.com/Scaleup-Excellenteam/checkpoint-yovel-or-noam/actions/workflows/ci.yml/badge.svg)](https://github.com/Scaleup-Excellenteam/checkpoint-yovel-or-noam/actions/workflows/ci.yml)
+
 Simple Python WebSocket chat project for the Tel-Hai Bootcamp checkpoint.
 
 ## What Works For Day 1
