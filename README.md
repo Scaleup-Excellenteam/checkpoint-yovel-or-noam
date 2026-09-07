@@ -118,6 +118,7 @@ The server also enforces these protections:
 - Login attempts, signups, WebSocket connections, and message speed are rate-limited.
 - Tokens expire after one hour; HTTP request bodies and WebSocket messages have size limits.
 - Raw chat text is not written to the log, and control characters in messages are rejected.
+- DLP blocks pineapple, TSPO secret markers, recipe declarations, and recipe-like messages before they are saved or sent. Three DLP violations close the connection. See [the full DLP policy](docs/dlp-policy.md).
 
 ### Network encryption
 

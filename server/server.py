@@ -16,6 +16,7 @@ from threading import Lock, Thread
 from typing import TYPE_CHECKING, Any
 
 import websockets
+from dlp import DLPScanner
 
 if TYPE_CHECKING:
     from websockets.asyncio.server import ServerConnection
@@ -56,10 +57,13 @@ MAX_LOGIN_ATTEMPTS_PER_WINDOW = 5
 LOGIN_WINDOW_SECONDS = 60
 MAX_SIGNUPS_PER_WINDOW = 3
 SIGNUP_WINDOW_SECONDS = 60 * 60
+MAX_DLP_VIOLATIONS = 3
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 request_history: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 message_history: dict["ServerConnection", deque[float]] = defaultdict(deque)
+dlp_violations: dict["ServerConnection", int] = defaultdict(int)
 rate_limit_lock = Lock()
+dlp_scanner = DLPScanner()
 
 
 def setup_logging() -> None:
@@ -484,6 +488,22 @@ async def chat(websocket: "ServerConnection") -> None:
                 await websocket.send(validation_error)
                 continue
 
+            dlp_decision = dlp_scanner.scan(message)
+            if not dlp_decision.allowed:
+                dlp_violations[websocket] += 1
+                logging.warning(
+                    "DLP blocked: user=%s room=%s reason=%s",
+                    username,
+                    room_name,
+                    dlp_decision.reason_code,
+                )
+                await websocket.send(f"Message blocked: {dlp_decision.reason_code}")
+                if dlp_violations[websocket] >= MAX_DLP_VIOLATIONS:
+                    await websocket.send("Too many DLP violations - connection closed")
+                    await websocket.close(1008, "Too many DLP violations")
+                    return
+                continue
+
             save_message(username, room_name, message)
             chat_message = f"[{room_name}] {username}: {message}"
             logging.info("Message saved: user=%s room=%s length=%d", username, room_name, len(message))
@@ -496,6 +516,7 @@ async def chat(websocket: "ServerConnection") -> None:
         client_rooms.pop(websocket, None)
         authenticated_clients.pop(websocket, None)
         message_history.pop(websocket, None)
+        dlp_violations.pop(websocket, None)
         if username is not None and room_name is not None:
             logging.info("Client disconnected: %s left %s", username, room_name)
 
