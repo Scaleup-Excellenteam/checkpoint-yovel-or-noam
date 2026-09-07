@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TSPO - מימוש אבטחה</title>
+  <style>
+    :root { color-scheme: light; font-family: Arial, sans-serif; }
+    body { margin: 0; background: #f7f3f6; color: #2e2430; line-height: 1.6; }
+    main { max-width: 880px; margin: 36px auto; padding: 0 20px 40px; }
+    header { background: #49263f; color: white; padding: 28px; border-radius: 14px; }
+    h1, h2 { margin-top: 0; }
+    section { background: white; margin-top: 20px; padding: 24px; border-radius: 14px; box-shadow: 0 2px 10px #2e243018; }
+    .flow { background: #f4e9ef; border-right: 5px solid #df1470; padding: 14px; white-space: pre-line; }
+    .ok { color: #147a46; font-weight: bold; }
+    .block { color: #b32638; font-weight: bold; }
+    code { direction: ltr; unicode-bidi: embed; background: #eee8ec; padding: 2px 5px; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { padding: 10px; border-bottom: 1px solid #eadfe5; text-align: right; }
+    th { background: #f4e9ef; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>TSPO - מימוש אבטחה</h1>
+      <p>הסבר על מניעת דליפת מתכונים ועל חסימת כתובות IP חשודות.</p>
+    </header>
+
+    <section>
+      <h2>1. DLP - הגנה על הודעות</h2>
+      <p>כל הודעה נבדקת בשרת לפני שמירה בבסיס הנתונים ולפני שליחה לחדר הצ'אט.</p>
+      <div class="flow">לקוח שולח הודעה
+→ השרת מפעיל DLP
+→ הודעה מותרת: נשמרת ונשלחת
+→ הודעה אסורה: נחסמת</div>
+      <table>
+        <tr><th>כלל</th><th>דוגמה</th><th>תוצאה</th></tr>
+        <tr><td>אננס אסור</td><td><code>pineapple</code> או אננס</td><td class="block">DLP_FORBIDDEN_PINEAPPLE</td></tr>
+        <tr><td>סוד TSPO</td><td><code>TSPO_SECRET_RECIPE</code></td><td class="block">DLP_EXPLICIT_SECRET</td></tr>
+        <tr><td>הצהרת מתכון</td><td>מתכון, מרכיבים, <code>recipe</code></td><td class="block">DLP_RECIPE_DECLARATION</td></tr>
+        <tr><td>מבנה של מתכון</td><td>מרכיב יחד עם פעולה כמו לערבב או לאפות</td><td class="block">DLP_RECIPE_STRUCTURE</td></tr>
+      </table>
+      <p>הודעה חסומה לא נשמרת, לא נשלחת למשתמשים אחרים, והלוג שומר רק את סיבת החסימה. אחרי שלוש הפרות DLP החיבור נסגר.</p>
+    </section>
+
+    <section>
+      <h2>2. Anti-Bot - הגנה בכניסה</h2>
+      <p>כאשר לקוח פותח WebSocket, השרת בודק את כתובת ה-IP לפני token, התחברות או בחירת חדר.</p>
+      <div class="flow">חיבור חדש
+→ קריאת IP
+→ בדיקת cache או VirusTotal
+→ החלטת ALLOW או BLOCK
+→ רק לקוח מותר ממשיך לאימות</div>
+      <table>
+        <tr><th>מצב</th><th>החלטה</th><th>reason code</th></tr>
+        <tr><td>IP ברשת פרטית בכיתה</td><td class="ok">מותר</td><td><code>IP_PRIVATE_NETWORK</code></td></tr>
+        <tr><td>VirusTotal מחזיר malicious</td><td class="block">חסום</td><td><code>IP_REPUTATION_MALICIOUS</code></td></tr>
+        <tr><td>VirusTotal מחזיר suspicious</td><td class="block">חסום</td><td><code>IP_REPUTATION_SUSPICIOUS</code></td></tr>
+        <tr><td>אין API key או השירות לא זמין</td><td class="ok">מותר ומתועד</td><td><code>REPUTATION_UNAVAILABLE</code></td></tr>
+      </table>
+      <p>תוצאת IP נשמרת ב-cache ל-10 דקות. כך לא פונים ל-VirusTotal בכל חיבור חדש. מפתח ה-API נשמר מקומית בקובץ <code>.env</code>, שאינו נכנס לגיטהאב.</p>
+    </section>
+
+    <section>
+      <h2>3. בדיקות</h2>
+      <ul>
+        <li>הודעות עם אננס, סודות ומתכונים נחסמות.</li>
+        <li>הודעה חסומה אינה נשמרת ואינה משודרת.</li>
+        <li>שלוש הפרות DLP סוגרות חיבור.</li>
+        <li>IP זדוני נחסם לפני אימות.</li>
+        <li>IP נקי, IP פרטי ושירות מוניטין לא זמין מטופלים בצורה צפויה.</li>
+      </ul>
+      <p>להרצת הבדיקות: <code>python -m pytest -q</code></p>
+    </section>
+  </main>
+</body>
+</html>
