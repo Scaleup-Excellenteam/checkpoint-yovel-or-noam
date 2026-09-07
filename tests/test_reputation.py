@@ -35,7 +35,7 @@ def test_reputation_allows_clean_and_private_network_ips():
 
 
 def test_reputation_allows_when_service_is_unavailable():
-    checker = IPReputationChecker(api_key=None)
+    checker = IPReputationChecker(api_key="")
 
     assert checker.check_ip("8.8.8.8") == ReputationDecision(True, "REPUTATION_UNAVAILABLE")
 

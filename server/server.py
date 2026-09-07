@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import secrets
 import sqlite3
@@ -65,6 +66,24 @@ message_history: dict["ServerConnection", deque[float]] = defaultdict(deque)
 dlp_violations: dict["ServerConnection", int] = defaultdict(int)
 rate_limit_lock = Lock()
 dlp_scanner = DLPScanner()
+
+
+def load_virustotal_api_key() -> None:
+    """Load only the local VirusTotal key from .env without overriding PowerShell."""
+    env_path = BASE_DIR / ".env"
+    if not env_path.is_file() or os.getenv("VIRUSTOTAL_API_KEY"):
+        return
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == "VIRUSTOTAL_API_KEY":
+            api_key = value.strip().strip('"').strip("'")
+            if api_key:
+                os.environ["VIRUSTOTAL_API_KEY"] = api_key
+            return
+
+
+load_virustotal_api_key()
 reputation_checker = IPReputationChecker()
 
 

@@ -141,6 +141,9 @@ uploads can be shared with security partners.
 $env:VIRUSTOTAL_API_KEY="paste-your-key-here"
 ```
 
+Alternatively, paste it after `VIRUSTOTAL_API_KEY=` in the local `.env` file.
+The server reads that file at startup; `.env` is ignored by Git.
+
 Start the server from that same PowerShell window. Without an API key, the
 server allows public IPs and records `REPUTATION_UNAVAILABLE`; it never places
 the key in the repository. Private IPs in a classroom or home network are
