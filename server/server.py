@@ -748,18 +748,43 @@ def start_rest_server() -> None:
     http_server.serve_forever()
 
 
+def forget_client(websocket: "ServerConnection", room_name: str) -> None:
+    """Remove a client that can no longer be reached from the room registers."""
+    rooms.get(room_name, set()).discard(websocket)
+    clients.discard(websocket)
+    authenticated_clients.pop(websocket, None)
+    client_rooms.pop(websocket, None)
+
+
 async def broadcast_to_room(room_name: str, message: str) -> None:
-    """Send a message to every client in one room."""
-    room_clients = rooms.get(room_name, set())
-    for client in room_clients.copy():
-        try:
-            await client.send(message)
-        except websockets.exceptions.ConnectionClosed:
-            room_clients.discard(client)
-            clients.discard(client)
-            authenticated_clients.pop(client, None)
-            client_rooms.pop(client, None)
-            logging.info("Removed disconnected client while broadcasting")
+    """Send a message to everyone in one room at the same time.
+
+    The sends used to run one after another, so a slow client delayed delivery
+    for everyone behind it in the room. Starting them together removes that
+    queue, and collecting the failures keeps one broken client from ending the
+    broadcast for the rest.
+    """
+    room_clients = list(rooms.get(room_name, set()))
+    if not room_clients:
+        return
+
+    outcomes = await asyncio.gather(
+        *(client.send(message) for client in room_clients),
+        return_exceptions=True,
+    )
+    for client, outcome in zip(room_clients, outcomes):
+        if not isinstance(outcome, BaseException):
+            continue
+        if isinstance(outcome, websockets.exceptions.ConnectionClosed):
+            forget_client(client, room_name)
+            logging.info("Removed disconnected client while broadcasting: room=%s", room_name)
+        else:
+            # Leave the connection to its own handler, which closes and tidies up.
+            logging.warning(
+                "Broadcast to one client failed: room=%s error=%s",
+                room_name,
+                type(outcome).__name__,
+            )
 
 
 def validate_chat_message(message: str) -> str | None:
