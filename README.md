@@ -367,20 +367,19 @@ python scripts\virustotal_check.py "C:\path\to\suspicious-file.exe"
 python scripts\virustotal_check.py "C:\path\to\suspicious-file.exe" --upload
 ```
 
-## Day 1 Demo Checklist
+## Final Demo Checklist (Day 3)
 
-1. Start the server.
-2. Open `/health`.
-3. Sign up two users from two clients (browser tabs, terminal clients, or one of each).
-4. Log in with both users.
-5. Join both users to `general`.
-6. Send messages and show both clients receive them.
-7. Connect a third client to `secret-pizza`.
-8. Send a message in `general` and show the third client does not receive it.
-9. Try an empty message and show it is rejected.
-10. Type `exit` (or press `Leave` in the browser), reconnect, and show the server keeps running.
-11. Open `logs/app.log` and show connection, room, message, and error events.
-12. Send `pineapple` from the browser and show the blocked message and the reason code.
+Use [the complete final-demo guide](docs/final-demo.md) for commands, expected
+results, and the presentation order. The short classroom sequence is:
+
+1. Start the server from the documented commands and open `/health`.
+2. Show signup, duplicate-user rejection, wrong-password rejection, and a correct login.
+3. Show that an invalid token cannot enter the chat.
+4. Connect two authenticated clients, exchange a message, and demonstrate room isolation.
+5. Send `pineapple` and show the DLP action and reason code before distribution.
+6. Show a live IP-reputation verdict and the repeatable malicious-IP enforcement test.
+7. Disconnect and reconnect a client, then inspect the relevant log events.
+8. Explain the architecture, two design patterns, a test/fix/retest example, and one limitation.
 
 ## Files
 

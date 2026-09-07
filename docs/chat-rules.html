@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>חוקי הצ׳אט — TSPO</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f3f5f8; color: #202b3b; font-family: Arial, sans-serif; line-height: 1.8; }
+    main { max-width: 880px; margin: 32px auto; padding: 28px; background: white; border-radius: 14px; }
+    h1 { margin: 0; color: #163d72; }
+    h2 { margin-top: 0; font-size: 1.25rem; }
+    section { border-top: 1px solid #dce2ea; padding-top: 20px; margin-top: 24px; }
+    code, bdi { overflow-wrap: anywhere; }
+    code { direction: ltr; unicode-bidi: isolate; display: inline-block; background: #edf1f6; padding: 0 5px; border-radius: 4px; }
+    .note { padding: 14px 18px; background: #fff4d6; border-right: 4px solid #a46a00; border-radius: 4px; }
+    .examples { padding: 12px 18px; background: #eef5fb; border-radius: 6px; }
+    li { margin-bottom: 6px; }
+    @media (max-width: 600px) { main { margin: 0; padding: 20px; border-radius: 0; } }
+    @media print { body { background: white; } main { margin: 0; max-width: none; padding: 0; } section { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>חוקי הצ׳אט</h1>
+    <p>הסבר פשוט על הכללים שממומשים במערכת TSPO. חוקי התוכן חלים גם בחדר <code>general</code> וגם בחדר <code>secret-pizza</code>.</p>
+  </header>
+
+  <section>
+    <h2>1. אננס אסור בכל הקשר</h2>
+    <p>כל הודעה שמכילה <strong>אננס</strong> או <code>pineapple</code> נחסמת, גם באותיות גדולות באנגלית.</p>
+    <p class="examples">נחסם: ״אני לא אוהב אננס״ — גם אזכור שלילי נחשב אזכור.</p>
+  </section>
+
+  <section>
+    <h2>2. סימנים של סודות אסורים</h2>
+    <p>הודעה שמכילה אחד מהסימנים הבאים נחסמת:</p>
+    <p><code>TSPO_SECRET_RECIPE</code>, <code>TSPO_SECRET_SAUCE</code>, <code>TSPO_DOUGH_FORMULA</code>, <code>VAULT_CODE</code>, <code>SECRET_RECIPE</code>, <code>SECRET_SAUCE</code>.</p>
+    <p>אלה סימנים שהגדרנו להדגמה. המערכת אינה מזהה באופן אוטומטי כל סוד אפשרי.</p>
+  </section>
+
+  <section>
+    <h2>3. מילים שמציינות מתכון אסורות בפני עצמן</h2>
+    <p><strong>בעברית:</strong> מתכון, המתכון, מרכיבים, הוראות הכנה, בצק סודי, רוטב סודי.</p>
+    <p><strong>באנגלית:</strong> <bdi dir="ltr">recipe, ingredients, instructions, secret recipe, secret sauce</bdi>.</p>
+    <p class="examples">נחסם: ״אל תשלחו מתכון״ — הבדיקה מזהה את המילה ולא מבינה את כוונת המשפט.</p>
+  </section>
+
+  <section>
+    <h2>4. רכיב יחד עם כמות או פעולת הכנה</h2>
+    <p>הודעה נחסמת אם יש בה <strong>גם רכיב מהרשימה וגם יחידת כמות או פעולת הכנה מהרשימות</strong>. שניהם צריכים להופיע באותה הודעה.</p>
+    <p><strong>רכיבים בעברית:</strong> בצק, רוטב, גבינה, מוצרלה, זיתים, פטריות, עגבניות, שום, בזיליקום, אורגנו, בצל.</p>
+    <p><strong>רכיבים באנגלית:</strong> <bdi dir="ltr">dough, crust, sauce, mozzarella, cheese, pepperoni, olives, mushrooms, tomato, garlic, basil, oregano, onion</bdi>.</p>
+    <p><strong>יחידות כמות:</strong> גרם, קילו, כוס, כפית, כף, <bdi dir="ltr">ml, kg, grams, cup, teaspoon, tablespoon</bdi>.</p>
+    <p><strong>פעולות הכנה:</strong> ללוש, לערבב, לאפות, לחמם, להוסיף, <bdi dir="ltr">mix, knead, bake, heat, add</bdi>.</p>
+    <ul class="examples">
+      <li>״להוסיף גבינה״ — נחסם.</li>
+      <li>״100 גרם גבינה״ — נחסם.</li>
+      <li>״אני אוהב גבינה״ — מותר.</li>
+      <li>״100 גבינה״ — מותר לפי הכללים הנוכחיים. מספר לבדו אינו סימן כמות.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>5. הודעות לא תקינות והצפה</h2>
+    <ul>
+      <li>אסור לשלוח הודעה ריקה או הודעה שמכילה רק רווחים.</li>
+      <li>אורך ההודעה מוגבל ל־500 תווים.</li>
+      <li>הודעות בינאריות ותווי בקרה, כמו טאב וירידת שורה, נדחים.</li>
+      <li>מותרות עד 20 הודעות בכל חלון של 10 שניות לחיבור. חריגה גורמת לניתוק.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>6. הרשמה, התחברות וחיבורים</h2>
+    <ul>
+      <li>שם משתמש חדש: 3–16 תווים, רק אותיות אנגליות, מספרים, <code>_</code> או <code>-</code>.</li>
+      <li>סיסמה חדשה: 8–128 תווים.</li>
+      <li>עד 5 ניסיונות התחברות בדקה לכל כתובת IP, כולל ניסיונות מוצלחים.</li>
+      <li>עד 3 ניסיונות הרשמה בשעה לכל כתובת IP.</li>
+      <li>עד 5 חיבורי צ׳אט במקביל לכל כתובת IP ועד 100 חיבורים בסך הכול.</li>
+      <li>הכניסה לצ׳אט דורשת token תקף. תוקפו נבדק בזמן הכניסה והוא מוגבל לשעה ממועד יצירתו.</li>
+      <li>כתובת IP ציבורית שסומנה ב־VirusTotal כזדונית או חשודה נחסמת.</li>
+    </ul>
+    <p>כתובת מקומית עוברת ללא בדיקה חיצונית. כאשר חסר מפתח API או שהבדיקה אינה זמינה, המימוש מאפשר כניסה ומציין שהבדיקה לא זמינה. בדיקת מוניטין אינה הוכחה שהמשתמש אנושי.</p>
+  </section>
+
+  <section>
+    <h2>מה קורה כשה־DLP חוסם הודעה?</h2>
+    <ol>
+      <li>השולח מקבל הודעה עם סיבת החסימה.</li>
+      <li>תוכן ההודעה אינו נשמר במסד הנתונים ואינו נשלח למשתמשים אחרים.</li>
+      <li>בלוג נרשמים פרטי האירוע וסיבתו, ללא תוכן ההודעה החסומה.</li>
+      <li>אחרי שלוש חסימות DLP באותו חיבור, המשתמש מנותק. הספירה היא לחיבור הנוכחי.</li>
+    </ol>
+  </section>
+
+  <section class="note">
+    <h2>מה המערכת עדיין לא יודעת לעשות?</h2>
+    <p>הבדיקה מחפשת קטעי טקסט, גם בתוך מילים, ולא מבינה משמעות. לפני החיפוש היא מאחדת הבדלי אותיות באנגלית, רווחים חוזרים וצורות Unicode תואמות.</p>
+    <p>לכן היא עלולה לחסום משפט תמים, או לפספס ניסוח אחר ומתכון שמפוצל בין הודעות. אין הבטחה לחסום כל מתכון או כל דרך לעקוף את הכללים.</p>
+  </section>
+</main>
+</body>
+</html>

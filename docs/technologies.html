@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>איך הטכנולוגיות בפרויקט עובדות?</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #eef2f6; color: #172536; font-family: Arial, sans-serif; line-height: 1.65; }
+    main { max-width: 960px; margin: auto; padding: 30px; background: #fff; border-radius: 14px; }
+    h1 { margin: 0; color: #153e68; }
+    .intro { margin: 8px 0 24px; color: #526273; }
+    .flow { padding: 15px; background: #e7f1fb; border-right: 5px solid #2878b8; border-radius: 6px; text-align: center; font-weight: bold; }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 20px; }
+    article { padding: 16px; border: 1px solid #dbe3eb; border-radius: 8px; }
+    h2 { margin: 0 0 8px; font-size: 20px; color: #174f7d; }
+    p { margin: 6px 0; }
+    strong { color: #172536; }
+    code { direction: ltr; unicode-bidi: isolate; display: inline-block; background: #edf1f5; padding: 1px 5px; border-radius: 4px; }
+    .limits { margin-top: 20px; padding: 14px 18px; background: #fff4d8; border-radius: 7px; }
+    @media (max-width: 700px) { body { padding: 8px; } main { padding: 18px; } .grid { grid-template-columns: 1fr; } }
+    @media print { body { padding: 0; background: #fff; } main { padding: 0; } article { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>איך הטכנולוגיות בפרויקט עובדות?</h1>
+  <p class="intro">הפרויקט הוא צ׳אט מאובטח בסיסי: הלקוח קולט את המשתמש, והשרת מחליט מי נכנס ואיזו הודעה מותר להפיץ.</p>
+
+  <div class="flow">הרשמה ב־REST ← קבלת Token ← חיבור WebSocket ← בדיקות אבטחה ← שמירה והפצה לחדר</div>
+
+  <div class="grid">
+    <article>
+      <h2>Python ומבנה לקוח–שרת</h2>
+      <p><strong>מה זה?</strong> Python היא שפת התכנות. הלקוח מתקשר עם שרת מרכזי שמנהל את המערכת.</p>
+      <p><strong>איך ביצענו?</strong> <code>cli_client.py</code> קורא קלט; <code>server.py</code> מאמת, בודק ומפיץ.</p>
+      <p><strong>למה בחרנו?</strong> Python קריאה ונוחה לרשת. שרת מרכזי מונע הסתמכות על בדיקות בצד המשתמש.</p>
+    </article>
+
+    <article>
+      <h2>REST, WebSocket ו־JSON</h2>
+      <p><strong>מה זה?</strong> REST הוא בקשה ותשובה. WebSocket הוא חיבור פתוח בזמן אמת. JSON הוא מבנה הנתונים שנשלח ביניהם.</p>
+      <p><strong>איך ביצענו?</strong> הרשמה וכניסה עוברות ב־HTTP בפורט 8000; הצ׳אט עובד ב־WebSocket בפורט 8765.</p>
+      <p><strong>למה בחרנו?</strong> REST מתאים לפעולה קצרה; WebSocket מאפשר לקבל הודעות מיד; JSON פשוט לקריאה.</p>
+    </article>
+
+    <article>
+      <h2>SQLite</h2>
+      <p><strong>מה זה?</strong> מסד נתונים ששומר מידע בתוך קובץ מקומי.</p>
+      <p><strong>איך ביצענו?</strong> טבלת משתמשים שומרת גיבובי סיסמאות וטבלת הודעות שומרת רק הודעות שאושרו.</p>
+      <p><strong>למה בחרנו?</strong> הוא מובנה ב־Python, פשוט לדמו ואינו דורש שרת מסד נתונים נוסף.</p>
+    </article>
+
+    <article>
+      <h2>סיסמאות ו־Token</h2>
+      <p><strong>מה זה?</strong> גיבוב הופך סיסמה לערך שלא אמורים להפוך בחזרה. Token הוא כרטיס כניסה זמני.</p>
+      <p><strong>איך ביצענו?</strong> הסיסמה עוברת <code>PBKDF2-HMAC-SHA256</code> עם מלח אקראי. לאחר כניסה נוצר Token אקראי לשעה ונשמר בזיכרון השרת.</p>
+      <p><strong>למה בחרנו?</strong> הסיסמה אינה נשמרת בגלוי ואינה נשלחת שוב בכניסה לצ׳אט. ה־Token שלנו פשוט ואינו JWT.</p>
+    </article>
+
+    <article>
+      <h2>DLP</h2>
+      <p><strong>מה זה?</strong> מנגנון שמונע דליפה של תוכן שהוגדר כרגיש.</p>
+      <p><strong>איך ביצענו?</strong> <code>dlp.py</code> מחפש אננס, סימני סוד ומבנה של מתכון. הבדיקה מתרחשת לפני שמירה והפצה.</p>
+      <p><strong>למה בחרנו?</strong> כללי טקסט קבועים מהירים, צפויים וקלים להסבר בדמו.</p>
+    </article>
+
+    <article>
+      <h2>Anti-Bot ו־VirusTotal</h2>
+      <p><strong>מה זה?</strong> VirusTotal אוסף מידע על המוניטין של כתובות IP ציבוריות.</p>
+      <p><strong>איך ביצענו?</strong> <code>reputation.py</code> שולח IP ציבורי ל־API וחוסם תוצאה זדונית או חשודה. תוצאות נשמרות זמנית במטמון.</p>
+      <p><strong>למה בחרנו?</strong> מקבלים מידע אבטחה ממקור חיצוני בלי לבנות מאגר כתובות משלנו.</p>
+    </article>
+
+    <article>
+      <h2>הגבלת קצב ו־asyncio</h2>
+      <p><strong>מה זה?</strong> הגבלת קצב מצמצמת הצפה. <code>asyncio</code> מאפשר לטפל בכמה חיבורי רשת בזמן דומה.</p>
+      <p><strong>איך ביצענו?</strong> השרת סופר פעולות בחלונות זמן ומנתק חריגות. בזמן שחיבור ממתין, <code>await</code> מאפשר לטפל באחרים.</p>
+      <p><strong>למה בחרנו?</strong> כך משתמש אחד לא עוצר את כולם וקשה יותר להציף את השירות.</p>
+    </article>
+
+    <article>
+      <h2>בדיקות וכלי אבטחה</h2>
+      <p><strong>מה זה?</strong> כלים שמוודאים שהקוד עובד ושאין בעיות מוכרות.</p>
+      <p><strong>איך ביצענו?</strong> <code>pytest</code> בודק כניסה, חדרים, DLP ו־WebSocket; ‏<code>Bandit</code> סורק קוד ו־<code>pip-audit</code> סורק ספריות.</p>
+      <p><strong>למה בחרנו?</strong> בדיקה אוטומטית חוזרת נותנת הוכחה שהתנהגות חשובה לא נשברה.</p>
+    </article>
+  </div>
+
+  <div class="limits">
+    <strong>המגבלות החשובות:</strong> ה־DLP מבוסס על מילים ולא מבין משמעות; בדיקת IP אינה מוכיחה שהמשתמש אנושי; אין הרשאה מיוחדת לחדר הסודי; ותקשורת הלקוח משתמשת כרגע ב־HTTP וב־WS ללא הצפנה.
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Design Patterns בפרויקט TSPO</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: #eef2f6; color: #19283a; font-family: Arial, sans-serif; line-height: 1.65; }
+    main { max-width: 900px; margin: auto; padding: 30px; background: white; border-radius: 14px; }
+    h1 { margin: 0; color: #153f6d; }
+    .intro { color: #526273; }
+    article { margin-top: 22px; padding: 20px; border: 1px solid #d8e1eb; border-radius: 9px; }
+    h2 { margin: 0 0 10px; color: #176195; }
+    h3 { margin: 14px 0 4px; font-size: 17px; }
+    p { margin: 5px 0; }
+    code { direction: ltr; unicode-bidi: isolate; display: inline-block; background: #edf2f6; padding: 2px 6px; border-radius: 4px; }
+    .flow { margin: 12px 0; padding: 13px; background: #e7f2fb; border-radius: 6px; text-align: center; font-weight: bold; }
+    .tradeoff { margin-top: 12px; padding: 10px 14px; background: #fff3d6; border-radius: 6px; }
+    .extra { margin-top: 22px; padding: 16px; background: #f4f6f8; border-radius: 8px; }
+    @media (max-width: 600px) { body { padding: 8px; } main { padding: 18px; } }
+    @media print { body { padding: 0; background: white; } main { padding: 0; } article { break-inside: avoid; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Design Patterns בפרויקט TSPO</h1>
+  <p class="intro">Design Pattern הוא רעיון מוכר לארגון קוד ולפתרון בעיה שחוזרת בפרויקטים רבים. בפרויקט שלנו יש שני דפוסים מרכזיים שאפשר להציג.</p>
+
+  <article>
+    <h2>1. Observer / Publish–Subscribe</h2>
+    <p><strong>הרעיון:</strong> משתמש נרשם לחדר. כאשר מתפרסמת הודעה, כל חברי אותו חדר מקבלים אותה.</p>
+    <div class="flow">משתמש שולח הודעה ← השרת מוצא את החדר ← ההודעה נשלחת לכל חברי החדר</div>
+
+    <h3>איך מימשנו?</h3>
+    <p><code>rooms</code> שומר את החיבורים בכל חדר. <code>join_room()</code> מוסיף משתמש, ו־<code>broadcast_to_room()</code> מפיץ את ההודעה. בניתוק המשתמש מוסר מהחדר.</p>
+
+    <h3>למה בחרנו?</h3>
+    <p>השולח לא צריך להכיר את שאר המשתמשים. השרת מנהל את ההפצה ושומר על הפרדה בין החדרים.</p>
+
+    <p class="tradeoff"><strong>חיסרון:</strong> החדרים נשמרים בזיכרון של שרת אחד. מערכת עם כמה שרתים תצטרך שירות משותף, למשל Redis Pub/Sub.</p>
+  </article>
+
+  <article>
+    <h2>2. Strategy עם Dependency Injection</h2>
+    <p><strong>הרעיון:</strong> נותנים לרכיב לקבל דרך פעולה מבחוץ, כדי שיהיה אפשר להחליף אותה בלי לשנות את הרכיב עצמו.</p>
+    <div class="flow">IP נכנס ← בודק המוניטין מפעיל Report Fetcher ← מתקבלת החלטת אישור או חסימה</div>
+
+    <h3>איך מימשנו?</h3>
+    <p><code>IPReputationChecker</code> מקבל פונקציה בשם <code>report_fetcher</code>. במערכת האמיתית היא פונה ל־VirusTotal; בבדיקות מחליפים אותה בפונקציה מזויפת שמחזירה תשובה מוכנה.</p>
+
+    <h3>למה בחרנו?</h3>
+    <p>אפשר לבדוק כתובת נקייה או זדונית בלי להיות תלויים באינטרנט, בלי לחשוף API key ובלי לבזבז קריאות VirusTotal.</p>
+
+    <p class="tradeoff"><strong>חיסרון:</strong> כרגע מחליפים רק את מקור הדוח. כדי להחליף את כל שיטת ההחלטה יהיה צורך בממשק Strategy רחב יותר.</p>
+  </article>
+
+  <div class="extra">
+    <strong>דפוסים נוספים:</strong> ממשק React מחולק לרכיבים קטנים, ו־Caddy משמש Reverse Proxy שמקבל HTTPS/WSS ומעביר את הבקשות לשרת Python. אלה דפוסים ארכיטקטוניים נוספים, אך שני הדפוסים המרכזיים להצגה הם Observer ו־Strategy.
+  </div>
+</main>
+</body>
+</html>
